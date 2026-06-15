@@ -2,9 +2,12 @@ idf_component_register(
     SRCS
         "app_main.c"
         "drivers/joystick_adc.c"
+        "telemetry/json_telemetry.c"
     INCLUDE_DIRS
         "."
         "drivers"
+        "telemetry"
     REQUIRES
         esp_adc
+        json
 )

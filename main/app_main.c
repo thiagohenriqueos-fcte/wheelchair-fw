@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "json_telemetry.h"
 #include "joystick_adc.h"
 #include "version.h"
 
@@ -17,6 +18,7 @@ static const char *TAG = "wheelchair_fw";
 void app_main(void)
 {
     uint32_t heartbeat = 0;
+    uint32_t telemetry_sequence = 0;
 
     ESP_LOGI(TAG, "%s", FIRMWARE_NAME);
     ESP_LOGI(TAG, "Version: %s", FIRMWARE_VERSION);
@@ -53,9 +55,13 @@ void app_main(void)
             const esp_err_t read_result = joystick_adc_read(&sample);
 
             if (read_result == ESP_OK) {
-                ESP_LOGI(TAG,
-                         "joy raw_x=%d raw_y=%d x=%.2f y=%.2f",
-                         sample.raw_x, sample.raw_y, sample.x, sample.y);
+                telemetry_sequence++;
+                const esp_err_t telemetry_result =
+                    json_telemetry_send_joystick(telemetry_sequence, &sample);
+                if (telemetry_result != ESP_OK) {
+                    ESP_LOGE(TAG, "JSON telemetry failed: %s",
+                             esp_err_to_name(telemetry_result));
+                }
             } else {
                 ESP_LOGE(TAG, "Joystick ADC read failed: %s",
                          esp_err_to_name(read_result));

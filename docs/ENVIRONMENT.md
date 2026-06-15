@@ -26,6 +26,17 @@ Run the project helper for a consolidated check:
 The helper only reports status. It does not install packages or modify the
 system.
 
+## v0.3 host serial tool
+
+`pyserial` is needed for the v0.3 Linux host test script, but not for building
+or flashing the firmware. Install it in a Python virtual environment, user
+environment, or distribution package as appropriate for the host. One common
+command is:
+
+```bash
+python3 -m pip install pyserial
+```
+
 ## Install and activate ESP-IDF
 
 Use the current official ESP-IDF Linux installation instructions from
@@ -78,6 +89,9 @@ idf.py -p /dev/ttyACM0 flash monitor
 ```
 
 Exit the monitor with `Ctrl+]`.
+
+Only one program can normally open the serial port at a time. Close
+`idf.py monitor` before running `scripts/read_json_serial.py`.
 
 ## Linux USB permissions
 
