@@ -1,58 +1,73 @@
 # Wheelchair ESP32-S3 Firmware
 
-ESP-IDF firmware for an ESP32-S3-based wheelchair control system.
+ESP-IDF firmware and Linux host tools for an ESP32-S3-based wheelchair
+control system.
 
-The current project release is **v0.3.2**. It adds filtering and visual
-interpolation to the host-side joystick monitor introduced in v0.3.1.
-Firmware behavior and its reported version remain `0.3.0` because v0.3.2
-changes only Linux host tooling.
+The current project release is **v0.4.0**. This version adds JSON movement
+command reception over USB serial. Commands are parsed, acknowledged, and
+stored for telemetry validation only. They are not connected to motors.
 
-## Firmware telemetry
+## Firmware behavior
 
 The firmware:
 
-- logs its name, version, hardware target, and `boot_ok` status at startup;
-- logs an incrementing heartbeat once per second;
-- reads joystick X on GPIO1 / ADC1 channel 0;
-- reads joystick Y on GPIO2 / ADC1 channel 1;
-- samples both axes at approximately 20 Hz using the modern ADC oneshot
-  driver;
-- sends raw ADC readings and normalized values from approximately `-1.0` to
-  `+1.0` as one JSON object per line;
-- applies a deadzone of `0.08` around the default raw center of `2048`.
+- uses USB Serial/JTAG for newline-delimited JSON input and output;
+- emits JSON startup status and an incrementing heartbeat;
+- samples joystick X on GPIO1 / ADC1_CH0 and Y on GPIO2 / ADC1_CH1 at
+  approximately 20 Hz using the ADC oneshot driver;
+- reports raw and normalized joystick values;
+- receives `cmd` and `stop` JSON objects in the `comm_rx_task`;
+- stores the latest valid host command and its receive timestamp;
+- sends an ACK for valid commands and an error packet for invalid input;
+- includes the latest command state in joystick telemetry.
 
 The joystick Y axis is inverted in software so that upward movement maps to
-positive Y and downward movement maps to negative Y. This does not alter the
-raw ADC readings or X-axis behavior.
+positive Y and downward movement maps to negative Y. Raw ADC readings are not
+modified. A deadzone of `0.08` is applied around the default raw center of
+`2048`.
 
-The initial normalization assumes a raw range of 0 to 4095. Actual joystick
-centers and endpoint ranges can vary and will be calibrated in a later
-version.
+Version 0.4 does **not** implement PWM, MCPWM, PCNT, encoders, motor control,
+PI control, safety logic, ROS 2, or command timeout behavior.
 
-This release intentionally does **not** implement host-to-ESP32 command
-reception, Raspberry Pi-specific behavior, ROS 2, PWM or MCPWM, encoders or
-PCNT, motor control, PI control, or safety logic.
+## JSON protocol
 
-## JSON telemetry
+Every packet is one UTF-8 JSON object followed by `\n`.
 
-Each successful joystick sample produces one UTF-8 JSON line:
+Movement command:
 
 ```json
-{"type":"joystick","version":"0.3.0","seq":1,"raw_x":2030,"raw_y":2052,"x":0,"y":0}
+{"type":"cmd","seq":1,"v":0.2,"w":0.0}
 ```
 
-Packet fields:
+Stop command:
 
-| Field | Meaning |
-| --- | --- |
-| `type` | Packet type, currently `joystick` |
-| `version` | Firmware version |
-| `seq` | Incrementing telemetry sequence number |
-| `raw_x`, `raw_y` | Unmodified ADC readings |
-| `x`, `y` | Deadzone-adjusted normalized axes |
+```json
+{"type":"stop","seq":2}
+```
 
-ESP-IDF boot and heartbeat logs share the serial console and are not JSON.
-The host test script reports those lines as invalid and continues reading.
+`v` is the requested linear velocity in m/s and `w` is the requested angular
+velocity in rad/s. They are stored but not acted upon in v0.4.
+
+Successful commands receive an ACK:
+
+```json
+{"type":"ack","seq":1,"cmd_seq":1,"status":"ok"}
+```
+
+Malformed JSON, unknown packet types, and invalid fields receive an error:
+
+```json
+{"type":"err","seq":2,"code":"invalid_json","status":"error"}
+```
+
+Joystick telemetry includes the latest command state:
+
+```json
+{"type":"joy","seq":10,"t_ms":12345,"fw":"0.4.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.2,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"status":"ok"}
+```
+
+Before the first valid command, `cmd_valid` is `false`, command values are
+zero, and `last_cmd_age_ms` is `null`.
 
 ## Joystick wiring
 
@@ -66,96 +81,82 @@ The host test script reports those lines as invalid and continues reading.
 Power the joystick from **3.3 V, not 5 V**. ESP32-S3 GPIO inputs are not
 5 V tolerant.
 
-## Build and run
+## Build and flash
 
-Install ESP-IDF first by following the official Espressif documentation and
-the project notes in [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md). In a terminal:
+Install ESP-IDF and follow [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md). Then:
 
 ```bash
 source "$HOME/esp/esp-idf/export.sh"
-./scripts/check_env.sh
 idf.py set-target esp32s3
 idf.py build
-idf.py -p /dev/ttyACM0 flash monitor
+idf.py -p /dev/ttyACM0 flash
 ```
 
-Depending on the ESP32-S3 board and USB cable, the serial port may instead be
-`/dev/ttyUSB0`. Exit the serial monitor with `Ctrl+]`.
+The port may instead be `/dev/ttyUSB0`, depending on the board and USB
+connection.
 
-## Linux host reader
+## Host command test
 
-Install `pyserial` in the Python environment used by the host:
-
-```bash
-python3 -m pip install -r requirements-dev.txt
-```
-
-Flash the board, close any ESP-IDF monitor using the same port, and run:
-
-```bash
-python3 scripts/read_json_serial.py /dev/ttyACM0
-```
-
-The default baud rate is 115200. Override it when needed:
-
-```bash
-python3 scripts/read_json_serial.py /dev/ttyACM0 --baud-rate 115200
-```
-
-The script is generic Linux host tooling. It can run on a notebook or a
-Raspberry Pi and does not contain host-specific paths or ROS 2 integration.
-
-## Joystick GUI
-
-The Tkinter visualization tool reads the same one-way JSON telemetry:
+Install the Python dependency in a virtual environment:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements-dev.txt
+```
+
+Send one movement command:
+
+```bash
+python3 scripts/send_json_command.py /dev/ttyACM0 --v 0.20 --w 0.00
+```
+
+Send stop:
+
+```bash
+python3 scripts/send_json_command.py /dev/ttyACM0 --stop
+```
+
+Send commands at 10 Hz for 5 seconds:
+
+```bash
+python3 scripts/send_json_command.py /dev/ttyACM0 \
+    --v 0.20 --w 0.00 --rate 10 --duration 5
+```
+
+Send a literal malformed line for error-path testing:
+
+```bash
+python3 scripts/send_json_command.py /dev/ttyACM0 \
+    --raw-line '{"type":"cmd"'
+```
+
+The script writes commands and reads ACK, error, heartbeat, status, and
+joystick packets through the same serial connection. It decodes UTF-8 safely
+and reports invalid response lines without crashing.
+
+Only one process can normally open `/dev/ttyACM0` at a time. Close
+`idf.py monitor`, `read_json_serial.py`, or `joystick_gui.py` before running
+`send_json_command.py`.
+
+## Other host tools
+
+Read and validate the JSON stream without sending commands:
+
+```bash
+python3 scripts/read_json_serial.py /dev/ttyACM0
+```
+
+Display joystick telemetry in the Tkinter GUI:
+
+```bash
 python3 scripts/joystick_gui.py /dev/ttyACM0
 ```
 
-Tkinter is provided by the Linux system Python package and is intentionally
-not listed in `requirements-dev.txt`.
-
-The default baud rate is 115200. It can be set explicitly:
-
-```bash
-python3 scripts/joystick_gui.py /dev/ttyACM0 --baud 115200
-```
-
-Version 0.3.2 smooths the visual dot in two stages:
-
-- an exponential moving average filters each received normalized axis;
-- a 33 ms GUI frame interpolates the visual position toward the filtered
-  target independently of the telemetry rate.
-
-The default filter and interpolation alphas are `0.25` and `0.20`. They can
-be tuned from the command line:
-
-```bash
-python3 scripts/joystick_gui.py /dev/ttyACM0 \
-    --filter-alpha 0.20 \
-    --interp-alpha 0.15 \
-    --gui-update-ms 33
-```
-
-The GUI displays raw and normalized axes, sequence number, packet status,
-packet age, valid/invalid counters, and the interpolated visual coordinates.
-Numeric `x` and `y` always show the latest received telemetry; filtering
-changes only the blue dot and the separate `visual x` and `visual y` fields.
-The visual vector remains clamped to the circular boundary.
-
-Current v0.3.0 packets do not include `t_ms` or an explicit `status`, so the
-GUI displays `t_ms` as `n/a` and derives status as `ok` for parsed JSON
-objects.
-
-The serial reader runs in a background thread and sends parsed events through
-a queue. Tkinter widgets are updated only from the main GUI thread.
-
-Version 0.3.2 remains telemetry-only. Version 0.4 is reserved for
-host-to-ESP32 command reception; it is not implemented here.
+The GUI keeps numeric telemetry unchanged while filtering and interpolating
+only the visual dot. The dot remains clamped inside its circular boundary.
+Tkinter is supplied by the system Python package and is not listed in
+`requirements-dev.txt`.
 
 ## Project layout
 
@@ -171,6 +172,12 @@ host-to-ESP32 command reception; it is not implemented here.
 │   ├── drivers/
 │   │   ├── joystick_adc.c
 │   │   └── joystick_adc.h
+│   ├── protocol/
+│   │   ├── json_command.c
+│   │   └── json_command.h
+│   ├── serial/
+│   │   ├── serial_io.c
+│   │   └── serial_io.h
 │   ├── telemetry/
 │   │   ├── json_telemetry.c
 │   │   └── json_telemetry.h
@@ -178,10 +185,10 @@ host-to-ESP32 command reception; it is not implemented here.
 ├── docs/
 └── scripts/
     ├── joystick_gui.py
-    └── read_json_serial.py
+    ├── read_json_serial.py
+    └── send_json_command.py
 ```
 
-See [docs/TEST_PLAN_V0_3_2.md](docs/TEST_PLAN_V0_3_2.md) for smoothing
-validation, [docs/TEST_PLAN_V0_3_1.md](docs/TEST_PLAN_V0_3_1.md) for the base
-GUI validation, and [docs/ROADMAP.md](docs/ROADMAP.md) for future releases.
-No functionality from v0.4 or later is included in this version.
+See [docs/TEST_PLAN_V0_4.md](docs/TEST_PLAN_V0_4.md) for validation and
+[docs/ROADMAP.md](docs/ROADMAP.md) for future releases. Do not begin v0.5
+until v0.4 has been validated independently.

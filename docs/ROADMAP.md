@@ -1,6 +1,6 @@
 # Firmware Roadmap
 
-Versions v0.1 through v0.3.2 are implemented in the current repository state.
+Versions v0.1 through v0.4 are implemented in the current repository state.
 
 | Version | Scope | Status |
 | --- | --- | --- |
@@ -9,7 +9,7 @@ Versions v0.1 through v0.3.2 are implemented in the current repository state.
 | v0.3 | ESP32-to-Linux-host JSON telemetry | Complete |
 | v0.3.1 | Linux host joystick GUI monitor | Complete |
 | v0.3.2 | Filtered and interpolated joystick GUI visualization | Complete |
-| v0.4 | Linux host-to-ESP32 JSON command reception | Planned |
+| v0.4 | Linux host-to-ESP32 JSON command reception | Complete |
 | v0.5 | MCPWM generation without a motor | Planned |
 | v0.6 | PWM test with a suspended motor | Planned |
 | v0.7 | PCNT encoder reading | Planned |

@@ -1,38 +1,46 @@
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "json_command.h"
 #include "json_telemetry.h"
 #include "joystick_adc.h"
+#include "serial_io.h"
 #include "version.h"
 
 #define JOYSTICK_SAMPLE_PERIOD_MS 50
 #define HEARTBEAT_PERIOD_MS 1000
-
-static const char *TAG = "wheelchair_fw";
 
 void app_main(void)
 {
     uint32_t heartbeat = 0;
     uint32_t telemetry_sequence = 0;
 
-    ESP_LOGI(TAG, "%s", FIRMWARE_NAME);
-    ESP_LOGI(TAG, "Version: %s", FIRMWARE_VERSION);
-    ESP_LOGI(TAG, "Target: %s", HARDWARE_TARGET);
-    ESP_LOGI(TAG, "Status: boot_ok");
+    if (serial_io_init() != ESP_OK) {
+        return;
+    }
 
     const esp_err_t joystick_init_result = joystick_adc_init();
     const bool joystick_ready = joystick_init_result == ESP_OK;
-    if (joystick_ready) {
-        ESP_LOGI(TAG, "Joystick ADC: ready");
-    } else {
-        ESP_LOGE(TAG, "Joystick ADC init failed: %s",
-                 esp_err_to_name(joystick_init_result));
+
+    const esp_err_t command_init_result = json_command_init();
+    const bool command_ready = command_init_result == ESP_OK;
+    bool receiver_ready = false;
+    if (command_ready) {
+        receiver_ready = json_command_start_receiver() == ESP_OK;
     }
+
+    json_telemetry_send_status("boot", "ok", FIRMWARE_NAME);
+    json_telemetry_send_status(
+        "joystick_adc",
+        joystick_ready ? "ok" : "error",
+        joystick_ready ? NULL : esp_err_to_name(joystick_init_result));
+    json_telemetry_send_status(
+        "command_receiver",
+        receiver_ready ? "ok" : "error",
+        receiver_ready ? NULL : "initialization_failed");
 
     TickType_t last_wake_time = xTaskGetTickCount();
     TickType_t last_heartbeat_time = last_wake_time;
@@ -46,7 +54,7 @@ void app_main(void)
         const TickType_t now = xTaskGetTickCount();
         if ((now - last_heartbeat_time) >= heartbeat_period) {
             heartbeat++;
-            ESP_LOGI(TAG, "heartbeat=%" PRIu32, heartbeat);
+            json_telemetry_send_heartbeat(heartbeat);
             last_heartbeat_time += heartbeat_period;
         }
 
@@ -55,16 +63,16 @@ void app_main(void)
             const esp_err_t read_result = joystick_adc_read(&sample);
 
             if (read_result == ESP_OK) {
-                telemetry_sequence++;
-                const esp_err_t telemetry_result =
-                    json_telemetry_send_joystick(telemetry_sequence, &sample);
-                if (telemetry_result != ESP_OK) {
-                    ESP_LOGE(TAG, "JSON telemetry failed: %s",
-                             esp_err_to_name(telemetry_result));
+                motion_command_t command = {0};
+                if (command_ready) {
+                    json_command_get_state(&command);
                 }
-            } else {
-                ESP_LOGE(TAG, "Joystick ADC read failed: %s",
-                         esp_err_to_name(read_result));
+
+                telemetry_sequence++;
+                json_telemetry_send_joystick(
+                    telemetry_sequence,
+                    &sample,
+                    &command);
             }
         }
     }
