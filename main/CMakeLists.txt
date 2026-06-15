@@ -1,4 +1,10 @@
 idf_component_register(
-    SRCS "app_main.c"
-    INCLUDE_DIRS "."
+    SRCS
+        "app_main.c"
+        "drivers/joystick_adc.c"
+    INCLUDE_DIRS
+        "."
+        "drivers"
+    REQUIRES
+        esp_adc
 )
