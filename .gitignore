@@ -1,0 +1,16 @@
+# ESP-IDF build output and generated configuration
+/build/
+/sdkconfig
+/sdkconfig.old
+
+# Editor and operating system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python cache files
+__pycache__/
+*.py[cod]
