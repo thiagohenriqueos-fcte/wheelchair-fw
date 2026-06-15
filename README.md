@@ -2,9 +2,9 @@
 
 ESP-IDF firmware for an ESP32-S3-based wheelchair control system.
 
-The current project release is **v0.3.1**. It adds a host-side graphical
-joystick monitor for the JSON telemetry introduced by firmware v0.3.0.
-Firmware behavior and its reported version remain `0.3.0` because v0.3.1
+The current project release is **v0.3.2**. It adds filtering and visual
+interpolation to the host-side joystick monitor introduced in v0.3.1.
+Firmware behavior and its reported version remain `0.3.0` because v0.3.2
 changes only Linux host tooling.
 
 ## Firmware telemetry
@@ -107,8 +107,7 @@ Raspberry Pi and does not contain host-specific paths or ROS 2 integration.
 
 ## Joystick GUI
 
-Version 0.3.1 adds a Tkinter visualization tool that reads the same one-way
-JSON telemetry:
+The Tkinter visualization tool reads the same one-way JSON telemetry:
 
 ```bash
 python3 -m venv .venv
@@ -126,15 +125,36 @@ The default baud rate is 115200. It can be set explicitly:
 python3 scripts/joystick_gui.py /dev/ttyACM0 --baud 115200
 ```
 
+Version 0.3.2 smooths the visual dot in two stages:
+
+- an exponential moving average filters each received normalized axis;
+- a 33 ms GUI frame interpolates the visual position toward the filtered
+  target independently of the telemetry rate.
+
+The default filter and interpolation alphas are `0.25` and `0.20`. They can
+be tuned from the command line:
+
+```bash
+python3 scripts/joystick_gui.py /dev/ttyACM0 \
+    --filter-alpha 0.20 \
+    --interp-alpha 0.15 \
+    --gui-update-ms 33
+```
+
 The GUI displays raw and normalized axes, sequence number, packet status,
-packet age, and valid/invalid counters. Current v0.3.0 packets do not include
-`t_ms` or an explicit `status`, so the GUI displays `t_ms` as `n/a` and
-derives status as `ok` for parsed JSON objects.
+packet age, valid/invalid counters, and the interpolated visual coordinates.
+Numeric `x` and `y` always show the latest received telemetry; filtering
+changes only the blue dot and the separate `visual x` and `visual y` fields.
+The visual vector remains clamped to the circular boundary.
+
+Current v0.3.0 packets do not include `t_ms` or an explicit `status`, so the
+GUI displays `t_ms` as `n/a` and derives status as `ok` for parsed JSON
+objects.
 
 The serial reader runs in a background thread and sends parsed events through
 a queue. Tkinter widgets are updated only from the main GUI thread.
 
-Version 0.3.1 remains telemetry-only. Version 0.4 is reserved for
+Version 0.3.2 remains telemetry-only. Version 0.4 is reserved for
 host-to-ESP32 command reception; it is not implemented here.
 
 ## Project layout
@@ -161,7 +181,7 @@ host-to-ESP32 command reception; it is not implemented here.
     └── read_json_serial.py
 ```
 
-See [docs/TEST_PLAN_V0_3_1.md](docs/TEST_PLAN_V0_3_1.md) for GUI validation,
-[docs/TEST_PLAN_V0_3.md](docs/TEST_PLAN_V0_3.md) for serial telemetry
-validation, and [docs/ROADMAP.md](docs/ROADMAP.md) for future releases. No
-functionality from v0.4 or later is included in this version.
+See [docs/TEST_PLAN_V0_3_2.md](docs/TEST_PLAN_V0_3_2.md) for smoothing
+validation, [docs/TEST_PLAN_V0_3_1.md](docs/TEST_PLAN_V0_3_1.md) for the base
+GUI validation, and [docs/ROADMAP.md](docs/ROADMAP.md) for future releases.
+No functionality from v0.4 or later is included in this version.
