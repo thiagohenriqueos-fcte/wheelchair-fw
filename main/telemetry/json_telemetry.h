@@ -15,6 +15,7 @@ esp_err_t json_telemetry_send_heartbeat(uint32_t counter);
 esp_err_t json_telemetry_send_joystick(
     uint32_t sequence,
     const joystick_adc_sample_t *sample,
-    const motion_command_t *command);
+    const motion_command_t *command,
+    const motor_test_command_t *motor_test);
 
 #endif

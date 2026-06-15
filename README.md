@@ -3,9 +3,10 @@
 ESP-IDF firmware and Linux host tools for an ESP32-S3-based wheelchair
 control system.
 
-The current project release is **v0.4.0**. This version adds JSON movement
-command reception over USB serial. Commands are parsed, acknowledged, and
-stored for telemetry validation only. They are not connected to motors.
+The current project release is **v0.5.0**. This version adds MCPWM PWM
+generation for two IBT-2 H-bridge modules. A host-side `pwm_test` command
+drives the PWM outputs directly for oscilloscope validation. No motor is
+connected during this stage.
 
 ## Firmware behavior
 
@@ -16,18 +17,21 @@ The firmware:
 - samples joystick X on GPIO1 / ADC1_CH0 and Y on GPIO2 / ADC1_CH1 at
   approximately 20 Hz using the ADC oneshot driver;
 - reports raw and normalized joystick values;
-- receives `cmd` and `stop` JSON objects in the `comm_rx_task`;
+- receives `cmd`, `stop`, and `pwm_test` JSON objects in the `comm_rx_task`;
 - stores the latest valid host command and its receive timestamp;
 - sends an ACK for valid commands and an error packet for invalid input;
-- includes the latest command state in joystick telemetry.
+- includes the latest command state in joystick telemetry;
+- generates MCPWM PWM signals on GPIO10 (left RPWM), GPIO11 (left LPWM),
+  GPIO12 (right RPWM), GPIO13 (right LPWM) at 20 kHz;
+- never drives RPWM and LPWM simultaneously for the same motor channel.
 
 The joystick Y axis is inverted in software so that upward movement maps to
 positive Y and downward movement maps to negative Y. Raw ADC readings are not
 modified. A deadzone of `0.08` is applied around the default raw center of
 `2048`.
 
-Version 0.4 does **not** implement PWM, MCPWM, PCNT, encoders, motor control,
-PI control, safety logic, ROS 2, or command timeout behavior.
+Version 0.5 does **not** implement encoders, PI control, closed-loop motor
+control, safety logic, ROS 2, or command timeout behavior.
 
 ## JSON protocol
 
@@ -46,7 +50,16 @@ Stop command:
 ```
 
 `v` is the requested linear velocity in m/s and `w` is the requested angular
-velocity in rad/s. They are stored but not acted upon in v0.4.
+velocity in rad/s. They are stored but not acted upon in v0.5.
+
+PWM test command:
+
+```json
+{"type":"pwm_test","seq":3,"left":0.5,"right":0.5}
+```
+
+`left` and `right` are duty-cycle fractions in [-1.0, 1.0]. Positive drives
+RPWM; negative drives LPWM. The complementary output is held at zero.
 
 Successful commands receive an ACK:
 
@@ -60,14 +73,15 @@ Malformed JSON, unknown packet types, and invalid fields receive an error:
 {"type":"err","seq":2,"code":"invalid_json","status":"error"}
 ```
 
-Joystick telemetry includes the latest command state:
+Joystick telemetry includes the latest command and motor test state:
 
 ```json
-{"type":"joy","seq":10,"t_ms":12345,"fw":"0.4.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.2,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"status":"ok"}
+{"type":"joy","seq":10,"t_ms":12345,"fw":"0.5.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.2,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"motor_left":0.5,"motor_right":0.5,"motor_test_active":true,"status":"ok"}
 ```
 
 Before the first valid command, `cmd_valid` is `false`, command values are
-zero, and `last_cmd_age_ms` is `null`.
+zero, and `last_cmd_age_ms` is `null`. Before the first `pwm_test` command,
+`motor_test_active` is `false` and motor values are zero.
 
 ## Joystick wiring
 
@@ -171,7 +185,9 @@ Tkinter is supplied by the system Python package and is not listed in
 │   ├── app_main.c
 │   ├── drivers/
 │   │   ├── joystick_adc.c
-│   │   └── joystick_adc.h
+│   │   ├── joystick_adc.h
+│   │   ├── motor_pwm.c
+│   │   └── motor_pwm.h
 │   ├── protocol/
 │   │   ├── json_command.c
 │   │   └── json_command.h
@@ -186,9 +202,9 @@ Tkinter is supplied by the system Python package and is not listed in
 └── scripts/
     ├── joystick_gui.py
     ├── read_json_serial.py
-    └── send_json_command.py
+    ├── send_json_command.py
+    └── send_motor_test.py
 ```
 
-See [docs/TEST_PLAN_V0_4.md](docs/TEST_PLAN_V0_4.md) for validation and
-[docs/ROADMAP.md](docs/ROADMAP.md) for future releases. Do not begin v0.5
-until v0.4 has been validated independently.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for future releases. Do not begin v0.6
+until v0.5 has been validated independently with an oscilloscope.

@@ -17,6 +17,7 @@
 
 static SemaphoreHandle_t state_mutex;
 static motion_command_t command_state;
+static motor_test_command_t motor_test_state;
 static uint32_t response_sequence;
 
 static uint32_t current_time_ms(void)
@@ -131,6 +132,26 @@ static esp_err_t store_command(
     return ESP_OK;
 }
 
+static esp_err_t store_motor_test(uint32_t host_sequence, float left, float right)
+{
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    motor_test_state.left     = left;
+    motor_test_state.right    = right;
+    motor_test_state.host_seq = host_sequence;
+    motor_test_state.valid    = true;
+
+    xSemaphoreGive(state_mutex);
+    return ESP_OK;
+}
+
+static void clear_motor_test_locked(void)
+{
+    motor_test_state = (motor_test_command_t){0};
+}
+
 static void process_command_line(const char *line)
 {
     cJSON *packet = cJSON_Parse(line);
@@ -155,6 +176,25 @@ static void process_command_line(const char *line)
         return;
     }
 
+    if (strcmp(type->valuestring, "pwm_test") == 0) {
+        float left = 0.0f;
+        float right = 0.0f;
+        const cJSON *l = cJSON_GetObjectItemCaseSensitive(packet, "left");
+        const cJSON *r = cJSON_GetObjectItemCaseSensitive(packet, "right");
+        if (!read_float(l, &left) || !read_float(r, &right)) {
+            cJSON_Delete(packet);
+            send_error("invalid_command");
+            return;
+        }
+        cJSON_Delete(packet);
+        if (store_motor_test(host_sequence, left, right) != ESP_OK) {
+            send_error("state_update_failed");
+            return;
+        }
+        send_ack(host_sequence);
+        return;
+    }
+
     float v_linear = 0.0f;
     float w_angular = 0.0f;
 
@@ -173,6 +213,14 @@ static void process_command_line(const char *line)
     }
 
     cJSON_Delete(packet);
+
+    if (strcmp(type->valuestring, "stop") == 0) {
+        if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+            clear_motor_test_locked();
+            xSemaphoreGive(state_mutex);
+        }
+    }
+
     if (store_command(host_sequence, v_linear, w_angular) != ESP_OK) {
         send_error("state_update_failed");
         return;
@@ -219,6 +267,7 @@ esp_err_t json_command_init(void)
     }
 
     command_state = (motion_command_t){0};
+    motor_test_state = (motor_test_command_t){0};
     response_sequence = 0;
     return ESP_OK;
 }
@@ -255,6 +304,25 @@ esp_err_t json_command_get_state(motion_command_t *state)
     }
 
     *state = command_state;
+    xSemaphoreGive(state_mutex);
+    return ESP_OK;
+}
+
+esp_err_t json_command_get_motor_test(motor_test_command_t *state)
+{
+    if (state == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (state_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    *state = motor_test_state;
     xSemaphoreGive(state_mutex);
     return ESP_OK;
 }

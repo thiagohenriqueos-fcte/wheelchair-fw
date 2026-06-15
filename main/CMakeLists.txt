@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "drivers/joystick_adc.c"
+        "drivers/motor_pwm.c"
         "protocol/json_command.c"
         "serial/serial_io.c"
         "telemetry/json_telemetry.c"
@@ -13,6 +14,7 @@ idf_component_register(
         "telemetry"
     REQUIRES
         esp_adc
+        esp_driver_mcpwm
         esp_driver_usb_serial_jtag
         esp_timer
         json

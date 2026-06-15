@@ -90,9 +90,10 @@ esp_err_t json_telemetry_send_heartbeat(uint32_t counter)
 esp_err_t json_telemetry_send_joystick(
     uint32_t sequence,
     const joystick_adc_sample_t *sample,
-    const motion_command_t *command)
+    const motion_command_t *command,
+    const motor_test_command_t *motor_test)
 {
-    if (sample == NULL || command == NULL) {
+    if (sample == NULL || command == NULL || motor_test == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -115,6 +116,9 @@ esp_err_t json_telemetry_send_joystick(
         cJSON_AddNumberToObject(packet, "cmd_w", command->w_angular) != NULL &&
         cJSON_AddNumberToObject(packet, "cmd_seq", command->host_seq) != NULL &&
         cJSON_AddBoolToObject(packet, "cmd_valid", command->valid) != NULL &&
+        cJSON_AddNumberToObject(packet, "motor_left", motor_test->valid ? motor_test->left : 0.0f) != NULL &&
+        cJSON_AddNumberToObject(packet, "motor_right", motor_test->valid ? motor_test->right : 0.0f) != NULL &&
+        cJSON_AddBoolToObject(packet, "motor_test_active", motor_test->valid) != NULL &&
         cJSON_AddStringToObject(packet, "status", "ok") != NULL;
 
     if (command->valid) {
