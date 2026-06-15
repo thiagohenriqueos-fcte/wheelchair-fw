@@ -282,12 +282,18 @@ class JoystickMonitor:
             self._move_dot(x, y)
 
     def _move_dot(self, x: float, y: float) -> None:
-        x = max(-1.0, min(1.0, x))
-        y = max(-1.0, min(1.0, y))
+        magnitude = math.hypot(x, y)
+        if magnitude > 1.0:
+            x_draw = x / magnitude
+            y_draw = y / magnitude
+        else:
+            x_draw = x
+            y_draw = y
 
         center = CANVAS_SIZE / 2
-        canvas_x = center + x * JOYSTICK_RADIUS
-        canvas_y = center - y * JOYSTICK_RADIUS
+        draw_radius = JOYSTICK_RADIUS - DOT_RADIUS
+        canvas_x = center + x_draw * draw_radius
+        canvas_y = center - y_draw * draw_radius
         self.canvas.coords(
             self.dot,
             canvas_x - DOT_RADIUS,
