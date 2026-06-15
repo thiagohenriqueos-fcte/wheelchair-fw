@@ -1,5 +1,6 @@
 #include "joystick_adc.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "esp_adc/adc_oneshot.h"
@@ -14,6 +15,9 @@
 #define JOYSTICK_RAW_CENTER 2048
 #define JOYSTICK_RAW_MAX 4095
 #define JOYSTICK_DEADZONE 0.08f
+
+#define JOYSTICK_INVERT_X 0
+#define JOYSTICK_INVERT_Y 1
 
 static adc_oneshot_unit_handle_t adc_handle;
 
@@ -30,7 +34,7 @@ static float clamp_axis(float value)
     return value;
 }
 
-static float normalize_axis(int raw)
+static float normalize_axis(int raw, bool invert)
 {
     float normalized;
 
@@ -46,6 +50,10 @@ static float normalize_axis(int raw)
     if (normalized > -JOYSTICK_DEADZONE &&
         normalized < JOYSTICK_DEADZONE) {
         return 0.0f;
+    }
+
+    if (invert) {
+        normalized = -normalized;
     }
 
     return normalized;
@@ -122,8 +130,8 @@ esp_err_t joystick_adc_read_normalized(float *x, float *y)
         return err;
     }
 
-    *x = normalize_axis(raw_x);
-    *y = normalize_axis(raw_y);
+    *x = normalize_axis(raw_x, JOYSTICK_INVERT_X);
+    *y = normalize_axis(raw_y, JOYSTICK_INVERT_Y);
 
     return ESP_OK;
 }
@@ -139,8 +147,8 @@ esp_err_t joystick_adc_read(joystick_adc_sample_t *sample)
         return err;
     }
 
-    sample->x = normalize_axis(sample->raw_x);
-    sample->y = normalize_axis(sample->raw_y);
+    sample->x = normalize_axis(sample->raw_x, JOYSTICK_INVERT_X);
+    sample->y = normalize_axis(sample->raw_y, JOYSTICK_INVERT_Y);
 
     return ESP_OK;
 }

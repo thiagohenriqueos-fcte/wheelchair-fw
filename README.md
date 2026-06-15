@@ -20,6 +20,10 @@ The firmware:
   `+1.0`;
 - applies a deadzone of `0.08` around the default raw center of `2048`.
 
+The joystick Y axis is inverted in software so that upward movement maps to
+positive Y and downward movement maps to negative Y. This does not alter the
+raw ADC readings or X-axis behavior.
+
 The initial normalization assumes a raw range of 0 to 4095. Actual joystick
 centers and endpoint ranges can vary and will be calibrated in a later
 version.

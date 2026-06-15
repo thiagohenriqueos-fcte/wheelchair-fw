@@ -13,6 +13,10 @@ Connect the joystick before powering the board:
 
 Do not power the joystick from 5 V. ESP32-S3 GPIO inputs are not 5 V tolerant.
 
+The joystick Y axis is inverted in software so that upward movement maps to
+positive Y and downward movement maps to negative Y. Raw ADC values remain
+unchanged.
+
 ## Validation checklist
 
 - [ ] 1. Source ESP-IDF and build the firmware with `idf.py build`.
@@ -22,12 +26,15 @@ Do not power the joystick from 5 V. ESP32-S3 GPIO inputs are not 5 V tolerant.
       close to `0.0`.
 - [ ] 5. Move joystick X positive and confirm `x` approaches `+1.0`.
 - [ ] 6. Move joystick X negative and confirm `x` approaches `-1.0`.
-- [ ] 7. Move joystick Y positive and confirm `y` approaches `+1.0`.
-- [ ] 8. Move joystick Y negative and confirm `y` approaches `-1.0`.
+- [ ] 7. Move the joystick up toward 12 o'clock and confirm `y` approaches
+      `+1.0`, while raw Y approaches `0`.
+- [ ] 8. Move the joystick down toward 6 o'clock and confirm `y` approaches
+      `-1.0`, while raw Y approaches `4095`.
 - [ ] 9. Release the joystick and confirm values return to `0.0` inside the
       deadzone.
 - [ ] 10. Confirm `heartbeat=N` continues to print once per second while
       joystick readings are active.
+- [ ] 11. Confirm X-axis direction and normalized values remain unchanged.
 
 Example output:
 
@@ -39,7 +46,7 @@ Status: boot_ok
 Joystick ADC: ready
 joy raw_x=2030 raw_y=2052 x=0.00 y=0.00
 heartbeat=1
-joy raw_x=2040 raw_y=3060 x=0.00 y=0.49
+joy raw_x=2040 raw_y=3060 x=0.00 y=-0.49
 ```
 
 The center and endpoint readings vary between joystick modules. Version 0.2
