@@ -2,11 +2,12 @@
 
 ESP-IDF firmware for an ESP32-S3-based wheelchair control system.
 
-The current release is **v0.3.0**. This release sends joystick telemetry as
-newline-delimited JSON over the ESP-IDF serial console while preserving the
-v0.1 boot message and heartbeat.
+The current project release is **v0.3.1**. It adds a host-side graphical
+joystick monitor for the JSON telemetry introduced by firmware v0.3.0.
+Firmware behavior and its reported version remain `0.3.0` because v0.3.1
+changes only Linux host tooling.
 
-## v0.3 behavior
+## Firmware telemetry
 
 The firmware:
 
@@ -86,7 +87,7 @@ Depending on the ESP32-S3 board and USB cable, the serial port may instead be
 Install `pyserial` in the Python environment used by the host:
 
 ```bash
-python3 -m pip install pyserial
+python3 -m pip install -r requirements-dev.txt
 ```
 
 Flash the board, close any ESP-IDF monitor using the same port, and run:
@@ -104,12 +105,45 @@ python3 scripts/read_json_serial.py /dev/ttyACM0 --baud-rate 115200
 The script is generic Linux host tooling. It can run on a notebook or a
 Raspberry Pi and does not contain host-specific paths or ROS 2 integration.
 
+## Joystick GUI
+
+Version 0.3.1 adds a Tkinter visualization tool that reads the same one-way
+JSON telemetry:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements-dev.txt
+python3 scripts/joystick_gui.py /dev/ttyACM0
+```
+
+Tkinter is provided by the Linux system Python package and is intentionally
+not listed in `requirements-dev.txt`.
+
+The default baud rate is 115200. It can be set explicitly:
+
+```bash
+python3 scripts/joystick_gui.py /dev/ttyACM0 --baud 115200
+```
+
+The GUI displays raw and normalized axes, sequence number, packet status,
+packet age, and valid/invalid counters. Current v0.3.0 packets do not include
+`t_ms` or an explicit `status`, so the GUI displays `t_ms` as `n/a` and
+derives status as `ok` for parsed JSON objects.
+
+The serial reader runs in a background thread and sends parsed events through
+a queue. Tkinter widgets are updated only from the main GUI thread.
+
+Version 0.3.1 remains telemetry-only. Version 0.4 is reserved for
+host-to-ESP32 command reception; it is not implemented here.
+
 ## Project layout
 
 ```text
 .
 ├── CMakeLists.txt
 ├── README.md
+├── requirements-dev.txt
 ├── sdkconfig.defaults
 ├── main/
 │   ├── CMakeLists.txt
@@ -123,9 +157,11 @@ Raspberry Pi and does not contain host-specific paths or ROS 2 integration.
 │   └── version.h
 ├── docs/
 └── scripts/
+    ├── joystick_gui.py
     └── read_json_serial.py
 ```
 
-See [docs/TEST_PLAN_V0_3.md](docs/TEST_PLAN_V0_3.md) for serial telemetry
-validation and [docs/ROADMAP.md](docs/ROADMAP.md) for future releases. No
+See [docs/TEST_PLAN_V0_3_1.md](docs/TEST_PLAN_V0_3_1.md) for GUI validation,
+[docs/TEST_PLAN_V0_3.md](docs/TEST_PLAN_V0_3.md) for serial telemetry
+validation, and [docs/ROADMAP.md](docs/ROADMAP.md) for future releases. No
 functionality from v0.4 or later is included in this version.

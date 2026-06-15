@@ -1,13 +1,14 @@
 # Firmware Roadmap
 
-Versions v0.1 through v0.3 are implemented in the current repository state.
+Versions v0.1 through v0.3.1 are implemented in the current repository state.
 
 | Version | Scope | Status |
 | --- | --- | --- |
 | v0.1 | Project base, Git, environment checks, and minimal boot firmware | Complete |
 | v0.2 | ADC joystick reading | Complete |
 | v0.3 | ESP32-to-Linux-host JSON telemetry | Complete |
-| v0.4 | Raspberry Pi-to-ESP32 JSON command reception | Planned |
+| v0.3.1 | Linux host joystick GUI monitor | Complete |
+| v0.4 | Linux host-to-ESP32 JSON command reception | Planned |
 | v0.5 | MCPWM generation without a motor | Planned |
 | v0.6 | PWM test with a suspended motor | Planned |
 | v0.7 | PCNT encoder reading | Planned |
