@@ -167,7 +167,7 @@ Read and validate the JSON stream without sending commands:
 python3 scripts/read_json_serial.py /dev/ttyACM0
 ```
 
-Integrated control GUI (v0.5.2 — monitor and send commands from one window):
+Integrated control GUI (v0.5.3 — monitor, send commands, and stream PWM continuously):
 
 ```bash
 python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
@@ -178,9 +178,15 @@ connection, solving the one-process-per-port limitation. The GUI has four
 panels: connection status, joystick monitor, motor PWM monitor, and a motor
 control panel with sliders and buttons.
 
-The `Send PWM` button is disabled until the safety checkbox is ticked.
-`STOP` is always active when connected. Closing the window sends a `stop`
+**Send Once** sends a single `pwm_test` command with the current slider values.
+**Start PWM Stream** begins continuous sending at `PWM_STREAM_HZ` (10 Hz) using
+Tkinter's `after()` scheduler — moving a slider during an active stream takes
+effect on the next tick automatically. **Stop PWM Stream** cancels the stream.
+`STOP` is always active, immediately cancels streaming, sends a `stop` command,
+and zeros both sliders. Closing the window stops streaming and sends a `stop`
 command before releasing the serial port.
+
+All stream-related buttons are disabled until the safety checkbox is ticked.
 
 Default slider range: ±0.30 (conservative, for suspended-motor testing).
 Full ±1.0 range requires editing `SLIDER_MIN` / `SLIDER_MAX` in the script.

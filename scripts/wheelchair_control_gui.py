@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Wheelchair integrated control GUI: telemetry monitor + PWM command sender.
 
-Opens one serial connection that is shared for continuous telemetry reading
-and for sending pwm_test / stop commands.  This removes the need to close
-the monitor before sending a command.
+Opens one serial connection shared for continuous telemetry reading and for
+sending pwm_test / stop commands.
+
+v0.5.3 adds a continuous PWM stream mode.  While the stream is active, the
+GUI sends the current slider values at PWM_STREAM_HZ (10 Hz) automatically.
+Moving a slider during an active stream takes effect on the next tick without
+requiring the user to click anything.
 
 Usage:
     python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
 
-WARNING: v0.5.2 is for suspended / no-load PWM testing ONLY.
+WARNING: v0.5.3 is for suspended / no-load PWM testing ONLY.
          Do not use with wheels on the ground or motors under any load.
 """
 
@@ -50,6 +54,10 @@ INTERP_ALPHA  = 0.20
 GUI_UPDATE_MS = 33
 AGE_UPDATE_MS = 100
 
+# Continuous PWM stream rate.  Change PWM_STREAM_HZ to adjust.
+PWM_STREAM_HZ        = 10
+PWM_STREAM_PERIOD_MS = 1000 // PWM_STREAM_HZ   # 100 ms at 10 Hz
+
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 
@@ -62,6 +70,7 @@ COLOR_LIMIT    = "#ff9800"
 COLOR_STOP_BTN = "#c62828"
 COLOR_STOP_TXT = "white"
 COLOR_WARN     = "#bf360c"
+COLOR_STREAM   = "#1565c0"   # blue — stream active indicator
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -175,7 +184,6 @@ def serial_reader(
     """
     try:
         with serial_module.Serial(port=port, baudrate=baud, timeout=0.2) as conn:
-            # Give the main thread access to the connection for writing.
             event_queue.put(("conn_ready", conn))
             event_queue.put(("connection", f"connected: {port} @ {baud}"))
 
@@ -197,7 +205,6 @@ def serial_reader(
     except serial_module.SerialException as exc:
         event_queue.put(("error", str(exc)))
     finally:
-        # Tell the main thread the connection is gone before it can be used.
         event_queue.put(("conn_gone", None))
         event_queue.put(("stopped", None))
 
@@ -231,6 +238,10 @@ class WheelchairControlGUI:
         self._write_lock = threading.Lock()
         self._seq = 0
 
+        # continuous PWM stream state
+        self._streaming: bool = False
+        self._stream_after_id: Optional[str] = None
+
         # counters / timing
         self.valid_packets   = 0
         self.invalid_packets = 0
@@ -254,17 +265,15 @@ class WheelchairControlGUI:
     # ── Widget construction ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.root.title("Wheelchair Control  v0.5.2")
+        self.root.title("Wheelchair Control  v0.5.3")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         outer = ttk.Frame(self.root, padding=10)
         outer.grid(row=0, column=0, sticky="nsew")
 
-        # row 0: status bar
         self._build_status_bar(outer)
 
-        # row 1: three panels
         joy_frame = ttk.LabelFrame(outer, text="Joystick", padding=8)
         joy_frame.grid(row=1, column=0, sticky="n", padx=(0, 8), pady=(0, 6))
         self._build_joystick_panel(joy_frame)
@@ -277,7 +286,6 @@ class WheelchairControlGUI:
         ctrl_frame.grid(row=1, column=2, sticky="nsew", pady=(0, 6))
         self._build_motor_control_panel(ctrl_frame)
 
-        # row 2: safety panel
         self._build_safety_panel(outer)
 
     # ── Status bar ────────────────────────────────────────────────────────────
@@ -331,10 +339,10 @@ class WheelchairControlGUI:
         )
         c.create_line(center - r, center, center + r, center, fill="#c0c0c0")
         c.create_line(center, center - r, center, center + r, fill="#c0c0c0")
-        c.create_text(center,       center - r - 14, text="+Y", fill="#555")
-        c.create_text(center,       center + r + 14, text="-Y", fill="#555")
-        c.create_text(center - r - 16, center,       text="-X", fill="#555")
-        c.create_text(center + r + 16, center,       text="+X", fill="#555")
+        c.create_text(center,          center - r - 14, text="+Y", fill="#555")
+        c.create_text(center,          center + r + 14, text="-Y", fill="#555")
+        c.create_text(center - r - 16, center,          text="-X", fill="#555")
+        c.create_text(center + r + 16, center,          text="+X", fill="#555")
 
         self._dot = c.create_oval(
             center - DOT_RADIUS, center - DOT_RADIUS,
@@ -479,15 +487,85 @@ class WheelchairControlGUI:
         ttk.Separator(parent, orient="horizontal").grid(
             row=2, column=0, columnspan=3, sticky="ew", pady=8)
 
-        # ── Send PWM ──────────────────────────────────────────────────────────
-        self._btn_send = ttk.Button(
+        # ── Send Once (single shot) ───────────────────────────────────────────
+        self._btn_send_once = ttk.Button(
             parent,
-            text="Send PWM",
-            command=self._on_send_pwm,
+            text="Send Once",
+            command=self._on_send_once,
             state="disabled",
         )
-        self._btn_send.grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        self._btn_send_once.grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        # ── Stream buttons ────────────────────────────────────────────────────
+        stream_btn_frame = ttk.Frame(parent)
+        stream_btn_frame.grid(
+            row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        stream_btn_frame.columnconfigure(0, weight=1)
+        stream_btn_frame.columnconfigure(1, weight=1)
+
+        self._btn_start_stream = ttk.Button(
+            stream_btn_frame,
+            text="Start PWM Stream",
+            command=self._on_start_stream,
+            state="disabled",
+        )
+        self._btn_start_stream.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+
+        self._btn_stop_stream = ttk.Button(
+            stream_btn_frame,
+            text="Stop PWM Stream",
+            command=self._on_stop_stream,
+            state="disabled",
+        )
+        self._btn_stop_stream.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+
+        # ── Stream status ─────────────────────────────────────────────────────
+        stream_info = ttk.Frame(parent)
+        stream_info.grid(
+            row=5, column=0, columnspan=3, sticky="ew", pady=(0, 2))
+
+        self._sv_stream_status = tk.StringVar(value="PWM stream: OFF")
+        self._lbl_stream_status = tk.Label(
+            stream_info,
+            textvariable=self._sv_stream_status,
+            font=("", 9, "bold"),
+            foreground=COLOR_STOP_FG,
+        )
+        self._lbl_stream_status.pack(side="left", padx=(0, 10))
+        ttk.Label(
+            stream_info,
+            text=f"{PWM_STREAM_HZ} Hz",
+            foreground=COLOR_STOP_FG,
+        ).pack(side="left")
+
+        # ── Last transmitted values ───────────────────────────────────────────
+        tx_frame = ttk.Frame(parent)
+        tx_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+
+        ttk.Label(tx_frame, text="Last TX:", foreground=COLOR_STOP_FG).pack(
+            side="left")
+        ttk.Label(tx_frame, text="L", foreground=COLOR_STOP_FG).pack(
+            side="left", padx=(8, 2))
+        self._sv_stream_left = tk.StringVar(value="+0.00")
+        ttk.Label(
+            tx_frame,
+            textvariable=self._sv_stream_left,
+            width=6,
+            font=("Courier", 9),
+        ).pack(side="left")
+        ttk.Label(tx_frame, text="R", foreground=COLOR_STOP_FG).pack(
+            side="left", padx=(8, 2))
+        self._sv_stream_right = tk.StringVar(value="+0.00")
+        ttk.Label(
+            tx_frame,
+            textvariable=self._sv_stream_right,
+            width=6,
+            font=("Courier", 9),
+        ).pack(side="left")
+
+        ttk.Separator(parent, orient="horizontal").grid(
+            row=7, column=0, columnspan=3, sticky="ew", pady=6)
 
         # ── STOP ─────────────────────────────────────────────────────────────
         self._btn_stop = tk.Button(
@@ -504,28 +582,29 @@ class WheelchairControlGUI:
             command=self._on_stop,
         )
         self._btn_stop.grid(
-            row=4, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+            row=8, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
         # ── Zero utilities ────────────────────────────────────────────────────
         util = ttk.Frame(parent)
-        util.grid(row=5, column=0, columnspan=3, sticky="ew")
+        util.grid(row=9, column=0, columnspan=3, sticky="ew")
         for col, (label, cmd) in enumerate([
             ("Zero Left",  self._on_zero_left),
             ("Zero Right", self._on_zero_right),
             ("Zero Both",  self._on_zero_both),
         ]):
             ttk.Button(util, text=label, command=cmd).grid(
-                row=0, column=col, sticky="ew", padx=(0 if col == 0 else 2, 0))
+                row=0, column=col, sticky="ew",
+                padx=(0 if col == 0 else 2, 0))
         util.columnconfigure(0, weight=1)
         util.columnconfigure(1, weight=1)
         util.columnconfigure(2, weight=1)
 
         ttk.Separator(parent, orient="horizontal").grid(
-            row=6, column=0, columnspan=3, sticky="ew", pady=8)
+            row=10, column=0, columnspan=3, sticky="ew", pady=8)
 
         # ── Latest response ───────────────────────────────────────────────────
         resp = ttk.LabelFrame(parent, text="Latest Response", padding=4)
-        resp.grid(row=7, column=0, columnspan=3, sticky="ew")
+        resp.grid(row=11, column=0, columnspan=3, sticky="ew")
         self._sv_last_ack = tk.StringVar(value="—")
         self._sv_last_err = tk.StringVar(value="—")
         ttk.Label(resp, text="ACK:", width=5, anchor="e").grid(
@@ -542,7 +621,7 @@ class WheelchairControlGUI:
         self._sv_seq = tk.StringVar(value="seq: 0")
         ttk.Label(parent, textvariable=self._sv_seq,
                   foreground=COLOR_STOP_FG, font=("", 8)).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            row=12, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     # ── Safety panel ──────────────────────────────────────────────────────────
 
@@ -554,7 +633,7 @@ class WheelchairControlGUI:
             safety,
             text=(
                 "⚠  Do not use with wheels on the ground. "
-                "v0.5.2 is for suspended / no-load PWM testing only."
+                "v0.5.3 is for suspended / no-load PWM testing only."
             ),
             foreground=COLOR_WARN,
             font=("", 9, "bold"),
@@ -616,7 +695,8 @@ class WheelchairControlGUI:
 
         if pkt_type == "ack":
             cmd_seq = pkt.get("cmd_seq", "?")
-            self._sv_last_ack.set(f"cmd_seq={cmd_seq}  status={pkt.get('status','?')}")
+            self._sv_last_ack.set(
+                f"cmd_seq={cmd_seq}  status={pkt.get('status','?')}")
             self._sv_last_rx.set(f"ACK  cmd_seq={cmd_seq}")
             return
 
@@ -626,7 +706,6 @@ class WheelchairControlGUI:
             self._sv_last_rx.set(f"ERR  code={code}")
             return
 
-        # "joy" and any other packets with telemetry fields
         raw_x = pkt.get("raw_x")
         raw_y = pkt.get("raw_y")
         self._sv_raw_x.set("—" if raw_x is None else str(raw_x))
@@ -653,12 +732,10 @@ class WheelchairControlGUI:
     def _gui_frame(self) -> None:
         self._process_queue()
 
-        # joystick dot
         self.visual_x = exp_step(self.visual_x, self.filtered_x, self.interp_alpha)
         self.visual_y = exp_step(self.visual_y, self.filtered_y, self.interp_alpha)
         self._move_dot(self.visual_x, self.visual_y)
 
-        # motor monitor
         eff_left  = self.motor_left  if self.motor_active else 0.0
         eff_right = self.motor_right if self.motor_active else 0.0
         self._update_bar(self._left_bar,  eff_left)
@@ -742,14 +819,82 @@ class WheelchairControlGUI:
     def _send_stop(self) -> bool:
         return self._send_command({"type": "stop"})
 
+    # ── Continuous stream ─────────────────────────────────────────────────────
+
+    def _stream_tick(self) -> None:
+        """Send one pwm_test command and re-schedule the next tick.
+
+        Called every PWM_STREAM_PERIOD_MS by Tkinter's after() scheduler.
+        Only the main thread ever calls this, so no additional locking needed
+        beyond the write lock already inside _send_raw().
+        """
+        if not self._streaming or self.closing:
+            self._stream_after_id = None
+            return
+
+        left  = round(self._var_left.get(),  2)
+        right = round(self._var_right.get(), 2)
+
+        ok = self._send_command({"type": "pwm_test", "left": left, "right": right})
+        if not ok:
+            # Write failure — stop streaming and show the error already set by _send_raw.
+            self._streaming = False
+            self._stream_after_id = None
+            self._update_stream_ui()
+            return
+
+        self._sv_stream_left.set(f"{left:+.2f}")
+        self._sv_stream_right.set(f"{right:+.2f}")
+
+        self._stream_after_id = self.root.after(
+            PWM_STREAM_PERIOD_MS, self._stream_tick)
+
+    def _update_stream_ui(self) -> None:
+        """Synchronise all stream-related button states and labels."""
+        safety    = self._safety_var.get()
+        streaming = self._streaming
+
+        # Send Once and Start: only when safe and not streaming
+        idle_state = "normal" if (safety and not streaming) else "disabled"
+        self._btn_send_once.configure(state=idle_state)
+        self._btn_start_stream.configure(state=idle_state)
+
+        # Stop stream: only when streaming
+        self._btn_stop_stream.configure(
+            state="normal" if streaming else "disabled")
+
+        if streaming:
+            self._sv_stream_status.set("PWM stream: ON")
+            self._lbl_stream_status.configure(foreground=COLOR_STREAM)
+        else:
+            self._sv_stream_status.set("PWM stream: OFF")
+            self._lbl_stream_status.configure(foreground=COLOR_STOP_FG)
+
     # ── Button handlers ───────────────────────────────────────────────────────
 
-    def _on_send_pwm(self) -> None:
+    def _on_send_once(self) -> None:
         left  = round(self._var_left.get(),  2)
         right = round(self._var_right.get(), 2)
         self._send_command({"type": "pwm_test", "left": left, "right": right})
+        self._sv_stream_left.set(f"{left:+.2f}")
+        self._sv_stream_right.set(f"{right:+.2f}")
+
+    def _on_start_stream(self) -> None:
+        if not self._safety_var.get():
+            return
+        self._streaming = True
+        self._update_stream_ui()
+        self._stream_tick()     # send immediately, then self-reschedules
+
+    def _on_stop_stream(self) -> None:
+        self._streaming = False
+        if self._stream_after_id is not None:
+            self.root.after_cancel(self._stream_after_id)
+            self._stream_after_id = None
+        self._update_stream_ui()
 
     def _on_stop(self) -> None:
+        self._on_stop_stream()  # cancel stream before sending stop
         self._send_stop()
         self._var_left.set(0.0)
         self._var_right.set(0.0)
@@ -765,8 +910,9 @@ class WheelchairControlGUI:
         self._var_right.set(0.0)
 
     def _on_safety_toggled(self) -> None:
-        state = "normal" if self._safety_var.get() else "disabled"
-        self._btn_send.configure(state=state)
+        if not self._safety_var.get() and self._streaming:
+            self._on_stop_stream()
+        self._update_stream_ui()
 
     # ── Close ─────────────────────────────────────────────────────────────────
 
@@ -774,8 +920,8 @@ class WheelchairControlGUI:
         if self.closing:
             return
         self.closing = True
-        # Best-effort stop command before the serial port closes.
-        self._send_stop()
+        self._on_stop_stream()  # cancel any pending stream tick first
+        self._send_stop()       # best-effort stop command
         self.stop_event.set()
         self._sv_conn.set("closing…")
         self._wait_for_reader()
