@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -11,8 +12,14 @@
 #include "serial_io.h"
 #include "version.h"
 
-#define JOYSTICK_SAMPLE_PERIOD_MS 50
-#define HEARTBEAT_PERIOD_MS 1000
+#define JOYSTICK_SAMPLE_PERIOD_MS  50
+#define HEARTBEAT_PERIOD_MS        1000
+
+/* Motor test watchdog: stop all PWM if no fresh command arrives within this window. */
+#define MOTOR_TEST_TIMEOUT_MS  500
+
+/* Conservative duty-cycle cap for physical motor tests with a suspended motor. */
+#define MOTOR_TEST_MAX_DUTY    0.30f
 
 void app_main(void)
 {
@@ -79,10 +86,28 @@ void app_main(void)
                 }
 
                 if (motor_ready) {
+                    bool drive = false;
                     if (motor_test.valid) {
-                        motor_pwm_set_left(motor_test.left);
-                        motor_pwm_set_right(motor_test.right);
-                    } else {
+                        const uint32_t now_ms =
+                            (uint32_t)(esp_timer_get_time() / 1000);
+                        const uint32_t age_ms =
+                            now_ms - motor_test.last_update_ms;
+                        if (age_ms < MOTOR_TEST_TIMEOUT_MS) {
+                            float l = motor_test.left;
+                            float r = motor_test.right;
+                            if (l >  MOTOR_TEST_MAX_DUTY) l =  MOTOR_TEST_MAX_DUTY;
+                            if (l < -MOTOR_TEST_MAX_DUTY) l = -MOTOR_TEST_MAX_DUTY;
+                            if (r >  MOTOR_TEST_MAX_DUTY) r =  MOTOR_TEST_MAX_DUTY;
+                            if (r < -MOTOR_TEST_MAX_DUTY) r = -MOTOR_TEST_MAX_DUTY;
+                            motor_pwm_set_left(l);
+                            motor_pwm_set_right(r);
+                            drive = true;
+                        } else {
+                            /* Watchdog: stale command — mark inactive for telemetry. */
+                            motor_test.valid = false;
+                        }
+                    }
+                    if (!drive) {
                         motor_pwm_stop_all();
                     }
                 }

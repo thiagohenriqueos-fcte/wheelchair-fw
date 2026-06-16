@@ -138,10 +138,11 @@ static esp_err_t store_motor_test(uint32_t host_sequence, float left, float righ
         return ESP_FAIL;
     }
 
-    motor_test_state.left     = left;
-    motor_test_state.right    = right;
-    motor_test_state.host_seq = host_sequence;
-    motor_test_state.valid    = true;
+    motor_test_state.left           = left;
+    motor_test_state.right          = right;
+    motor_test_state.host_seq       = host_sequence;
+    motor_test_state.last_update_ms = current_time_ms();
+    motor_test_state.valid          = true;
 
     xSemaphoreGive(state_mutex);
     return ESP_OK;

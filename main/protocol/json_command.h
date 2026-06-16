@@ -18,6 +18,7 @@ typedef struct {
     float left;
     float right;
     uint32_t host_seq;
+    uint32_t last_update_ms;
     bool valid;
 } motor_test_command_t;
 

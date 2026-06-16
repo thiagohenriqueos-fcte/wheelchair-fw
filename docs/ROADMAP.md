@@ -1,6 +1,6 @@
 # Firmware Roadmap
 
-Versions v0.1 through v0.5 are implemented in the current repository state.
+Versions v0.1 through v0.6 (including v0.5.1 and v0.5.2) are implemented in the current repository state.
 
 | Version | Scope | Status |
 | --- | --- | --- |
@@ -11,7 +11,9 @@ Versions v0.1 through v0.5 are implemented in the current repository state.
 | v0.3.2 | Filtered and interpolated joystick GUI visualization | Complete |
 | v0.4 | Linux host-to-ESP32 JSON command reception | Complete |
 | v0.5 | MCPWM generation without a motor | Complete |
-| v0.6 | PWM test with a suspended motor | Planned |
+| v0.5.1 | Joystick and motor PWM GUI monitor (host-side only) | Complete |
+| v0.5.2 | Integrated control GUI: telemetry + PWM commands in one window | Complete |
+| v0.6 | PWM test with a suspended motor | Complete |
 | v0.7 | PCNT encoder reading | Planned |
 | v0.8 | RPM and speed calculation | Planned |
 | v0.9 | Open-loop joystick-to-PWM control | Planned |

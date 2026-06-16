@@ -21,12 +21,18 @@ DEFAULT_STARTUP_DELAY = 1.0
 UINT32_MAX = (1 << 32) - 1
 
 
+MOTOR_TEST_MAX_DUTY = 0.30
+
+
 def clamped_float(value: str) -> float:
     result = float(value)
     if not math.isfinite(result):
         raise argparse.ArgumentTypeError("must be a finite number")
-    if result < -1.0 or result > 1.0:
-        raise argparse.ArgumentTypeError("must be between -1.0 and 1.0")
+    if result < -MOTOR_TEST_MAX_DUTY or result > MOTOR_TEST_MAX_DUTY:
+        raise argparse.ArgumentTypeError(
+            f"must be between -{MOTOR_TEST_MAX_DUTY} and {MOTOR_TEST_MAX_DUTY} "
+            "(v0.6 motor test limit — motor must be suspended)"
+        )
     return result
 
 
@@ -71,13 +77,13 @@ def parse_arguments() -> argparse.Namespace:
         "--left",
         type=clamped_float,
         default=0.0,
-        help="Left motor command in [-1.0, 1.0]. Positive = forward (RPWM).",
+        help="Left motor command in [-0.30, 0.30]. Positive = forward (RPWM).",
     )
     parser.add_argument(
         "--right",
         type=clamped_float,
         default=0.0,
-        help="Right motor command in [-1.0, 1.0]. Positive = forward (RPWM).",
+        help="Right motor command in [-0.30, 0.30]. Positive = forward (RPWM).",
     )
     parser.add_argument(
         "--seq",

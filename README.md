@@ -3,10 +3,11 @@
 ESP-IDF firmware and Linux host tools for an ESP32-S3-based wheelchair
 control system.
 
-The current project release is **v0.5.0**. This version adds MCPWM PWM
-generation for two IBT-2 H-bridge modules. A host-side `pwm_test` command
-drives the PWM outputs directly for oscilloscope validation. No motor is
-connected during this stage.
+The current project release is **v0.6.0**. This version tests MCPWM output
+with a real IBT-2 H-bridge and motor physically connected. The motor must be
+suspended (wheel off the ground, no load) for all v0.6 tests. A 500 ms
+command watchdog stops all PWM automatically if no fresh `pwm_test` command
+arrives. Duty-cycle commands are clamped to ±0.30 in firmware.
 
 ## Firmware behavior
 
@@ -20,18 +21,20 @@ The firmware:
 - receives `cmd`, `stop`, and `pwm_test` JSON objects in the `comm_rx_task`;
 - stores the latest valid host command and its receive timestamp;
 - sends an ACK for valid commands and an error packet for invalid input;
-- includes the latest command state in joystick telemetry;
+- includes the latest command and motor test state in joystick telemetry;
 - generates MCPWM PWM signals on GPIO10 (left RPWM), GPIO11 (left LPWM),
   GPIO12 (right RPWM), GPIO13 (right LPWM) at 20 kHz;
-- never drives RPWM and LPWM simultaneously for the same motor channel.
+- never drives RPWM and LPWM simultaneously for the same motor channel;
+- stops all PWM if no `pwm_test` command is received within 500 ms (watchdog);
+- clamps `pwm_test` duty-cycle commands to ±0.30 before driving the output.
 
 The joystick Y axis is inverted in software so that upward movement maps to
 positive Y and downward movement maps to negative Y. Raw ADC readings are not
 modified. A deadzone of `0.08` is applied around the default raw center of
 `2048`.
 
-Version 0.5 does **not** implement encoders, PI control, closed-loop motor
-control, safety logic, ROS 2, or command timeout behavior.
+Version 0.6 does **not** implement encoders, PI control, closed-loop motor
+control, or ROS 2.
 
 ## JSON protocol
 
@@ -55,11 +58,13 @@ velocity in rad/s. They are stored but not acted upon in v0.5.
 PWM test command:
 
 ```json
-{"type":"pwm_test","seq":3,"left":0.5,"right":0.5}
+{"type":"pwm_test","seq":3,"left":0.15,"right":0.00}
 ```
 
-`left` and `right` are duty-cycle fractions in [-1.0, 1.0]. Positive drives
-RPWM; negative drives LPWM. The complementary output is held at zero.
+`left` and `right` are duty-cycle fractions. Positive drives RPWM; negative
+drives LPWM. The complementary output is held at zero. The firmware clamps
+values to ±0.30. If no fresh `pwm_test` command arrives within 500 ms, all
+PWM outputs are forced low automatically.
 
 Successful commands receive an ACK:
 
@@ -76,12 +81,13 @@ Malformed JSON, unknown packet types, and invalid fields receive an error:
 Joystick telemetry includes the latest command and motor test state:
 
 ```json
-{"type":"joy","seq":10,"t_ms":12345,"fw":"0.5.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.2,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"motor_left":0.5,"motor_right":0.5,"motor_test_active":true,"status":"ok"}
+{"type":"joy","seq":10,"t_ms":12345,"fw":"0.6.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.0,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"motor_left":0.15,"motor_right":0.0,"motor_test_active":true,"status":"ok"}
 ```
 
 Before the first valid command, `cmd_valid` is `false`, command values are
-zero, and `last_cmd_age_ms` is `null`. Before the first `pwm_test` command,
-`motor_test_active` is `false` and motor values are zero.
+zero, and `last_cmd_age_ms` is `null`. `motor_test_active` is `false` when no
+`pwm_test` command has been received, when a `stop` command clears the state,
+or when the 500 ms watchdog fires.
 
 ## Joystick wiring
 
@@ -161,14 +167,36 @@ Read and validate the JSON stream without sending commands:
 python3 scripts/read_json_serial.py /dev/ttyACM0
 ```
 
-Display joystick telemetry in the Tkinter GUI:
+Integrated control GUI (v0.5.2 — monitor and send commands from one window):
+
+```bash
+python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
+```
+
+Reads telemetry and sends `pwm_test` / `stop` commands over the same serial
+connection, solving the one-process-per-port limitation. The GUI has four
+panels: connection status, joystick monitor, motor PWM monitor, and a motor
+control panel with sliders and buttons.
+
+The `Send PWM` button is disabled until the safety checkbox is ticked.
+`STOP` is always active when connected. Closing the window sends a `stop`
+command before releasing the serial port.
+
+Default slider range: ±0.30 (conservative, for suspended-motor testing).
+Full ±1.0 range requires editing `SLIDER_MIN` / `SLIDER_MAX` in the script.
+
+Read-only monitor GUI (v0.5.1 — no send capability, one process needed):
+
+```bash
+python3 scripts/wheelchair_gui.py /dev/ttyACM0
+```
+
+Joystick-only GUI (the original v0.3.x monitor, preserved for reference):
 
 ```bash
 python3 scripts/joystick_gui.py /dev/ttyACM0
 ```
 
-The GUI keeps numeric telemetry unchanged while filtering and interpolating
-only the visual dot. The dot remains clamped inside its circular boundary.
 Tkinter is supplied by the system Python package and is not listed in
 `requirements-dev.txt`.
 
@@ -203,8 +231,10 @@ Tkinter is supplied by the system Python package and is not listed in
     ├── joystick_gui.py
     ├── read_json_serial.py
     ├── send_json_command.py
-    └── send_motor_test.py
+    ├── send_motor_test.py
+    ├── wheelchair_control_gui.py
+    └── wheelchair_gui.py
 ```
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for future releases. Do not begin v0.6
-until v0.5 has been validated independently with an oscilloscope.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for future releases. Do not begin v0.7
+until v0.6 has been validated independently with a suspended motor.
