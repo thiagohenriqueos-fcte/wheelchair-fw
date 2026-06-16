@@ -2,7 +2,7 @@
 #define WHEELCHAIR_FIRMWARE_VERSION_H
 
 #define FIRMWARE_NAME "Wheelchair ESP32-S3 Firmware"
-#define FIRMWARE_VERSION "0.6.0"
+#define FIRMWARE_VERSION "0.6.2"
 #define HARDWARE_TARGET "ESP32-S3"
 
 #endif

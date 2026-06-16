@@ -11,11 +11,11 @@
 #define RIGHT_LPWM_GPIO  13
 
 /*
- * 20 MHz resolution -> period_ticks = 20 000 000 / 20 000 = 1000.
- * Gives 0.1 % duty-cycle granularity at 20 kHz, well within IBT-2 requirements.
+ * 20 MHz resolution -> period_ticks = 20 000 000 / 25 000 = 800.
+ * Gives 0.125 % duty-cycle granularity at 25 kHz, well within IBT-2 requirements.
  */
 #define MCPWM_RESOLUTION_HZ  20000000U
-#define PWM_FREQ_HZ          20000U
+#define PWM_FREQ_HZ          25000U
 #define MCPWM_PERIOD_TICKS   (MCPWM_RESOLUTION_HZ / PWM_FREQ_HZ)
 
 typedef struct {

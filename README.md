@@ -3,11 +3,12 @@
 ESP-IDF firmware and Linux host tools for an ESP32-S3-based wheelchair
 control system.
 
-The current project release is **v0.6.0**. This version tests MCPWM output
+The current project release is **v0.6.2**. This version tests MCPWM output
 with a real IBT-2 H-bridge and motor physically connected. The motor must be
 suspended (wheel off the ground, no load) for all v0.6 tests. A 500 ms
 command watchdog stops all PWM automatically if no fresh `pwm_test` command
-arrives. Duty-cycle commands are clamped to ±0.30 in firmware.
+arrives. The GUI PWM limit defaults to 0.30; the firmware accepts the full
+±1.0 range but operator safety relies on the GUI limit and the STOP button.
 
 ## Firmware behavior
 
@@ -23,10 +24,11 @@ The firmware:
 - sends an ACK for valid commands and an error packet for invalid input;
 - includes the latest command and motor test state in joystick telemetry;
 - generates MCPWM PWM signals on GPIO10 (left RPWM), GPIO11 (left LPWM),
-  GPIO12 (right RPWM), GPIO13 (right LPWM) at 20 kHz;
+  GPIO12 (right RPWM), GPIO13 (right LPWM) at 25 kHz;
 - never drives RPWM and LPWM simultaneously for the same motor channel;
 - stops all PWM if no `pwm_test` command is received within 500 ms (watchdog);
-- clamps `pwm_test` duty-cycle commands to ±0.30 before driving the output.
+- accepts duty-cycle commands up to ±1.0; the GUI PWM limit (default 0.30)
+  is the operator-facing safety gate — do not raise it without a suspended motor.
 
 The joystick Y axis is inverted in software so that upward movement maps to
 positive Y and downward movement maps to negative Y. Raw ADC readings are not
@@ -167,7 +169,7 @@ Read and validate the JSON stream without sending commands:
 python3 scripts/read_json_serial.py /dev/ttyACM0
 ```
 
-Integrated control GUI (v0.6.1 — monitor, send commands, stream PWM, and tune joystick smoothing live):
+Integrated control GUI (v0.6.2 — monitor, send commands, stream PWM, tune smoothing, fullscreen, configurable PWM limit):
 
 ```bash
 python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
@@ -187,6 +189,15 @@ and zeros both sliders. Closing the window stops streaming and sends a `stop`
 command before releasing the serial port.
 
 All stream-related buttons are disabled until the safety checkbox is ticked.
+
+Press **F11** (or the Fullscreen button) to enter fullscreen. Press **Esc** or
+"Exit Fullscreen" to return. STOP remains always visible in fullscreen.
+
+A **PWM limit** slider in the motor control panel sets the maximum duty cycle
+the GUI will send (0.00–1.00, default 0.30). Click **Apply PWM Limit** to
+update the motor sliders and clamp current values. A warning appears when the
+limit exceeds 0.30. **Reset to 0.30** returns to the safe default. The firmware
+accepts up to ±1.0 but the GUI limit is the operator-facing safety gate.
 
 A **Joystick smoothing settings** panel lets you tune three visualization
 parameters at runtime without restarting the GUI:

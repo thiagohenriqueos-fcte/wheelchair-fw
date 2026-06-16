@@ -4,18 +4,18 @@
 Opens one serial connection shared for continuous telemetry reading and for
 sending pwm_test / stop commands.
 
-v0.5.3 adds a continuous PWM stream mode.  While the stream is active, the
-GUI sends the current slider values at PWM_STREAM_HZ (10 Hz) automatically.
-
-v0.6.1 adds live-adjustable joystick smoothing settings (filter alpha,
-interpolation alpha, GUI update interval) with an explicit three-state joystick
-pipeline: latest → filtered → visual.
+v0.5.3 adds a continuous PWM stream mode.
+v0.6.1 adds live-adjustable joystick smoothing controls.
+v0.6.2 adds fullscreen support, a user-configurable PWM limit, and documents
+the 25 kHz firmware PWM frequency.
 
 Usage:
     python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
 
-WARNING: v0.6.1 is for suspended / no-load PWM testing ONLY.
+WARNING: v0.6.2 is for suspended / no-load PWM testing ONLY.
          Do not use with wheels on the ground or motors under any load.
+         The GUI PWM limit defaults to 0.30 and must only be raised for
+         controlled suspended-motor tests.
 """
 
 import argparse
@@ -32,8 +32,12 @@ from typing import Any, Dict, Optional, Tuple
 
 # ── Safety / Range ────────────────────────────────────────────────────────────
 
-SLIDER_MIN = -0.30
-SLIDER_MAX = +0.30
+# Default PWM limit presented to the operator.  Raise only for suspended tests.
+PWM_LIMIT_DEFAULT = 0.30
+PWM_LIMIT_MIN     = 0.00
+PWM_LIMIT_MAX     = 1.00
+# Threshold above which a safety warning is displayed in the GUI.
+PWM_LIMIT_WARN_THRESHOLD = 0.30
 
 
 # ── Layout ────────────────────────────────────────────────────────────────────
@@ -54,8 +58,7 @@ INTERP_ALPHA  = 0.20
 GUI_UPDATE_MS = 33
 AGE_UPDATE_MS = 100
 
-# Smoothing control bounds (enforced by the sliders).
-SMOOTHING_ALPHA_MIN = 0.01   # 0.0 would freeze the joystick display entirely
+SMOOTHING_ALPHA_MIN = 0.01
 SMOOTHING_ALPHA_MAX = 1.0
 GUI_MS_MIN = 10
 GUI_MS_MAX = 100
@@ -239,6 +242,9 @@ class WheelchairControlGUI:
         self.interp_alpha  = interp_alpha
         self.gui_update_ms = gui_update_ms
 
+        # currently applied PWM limit (operator-facing safety gate)
+        self._pwm_limit = PWM_LIMIT_DEFAULT
+
         # shared serial connection — written by main thread only, under _write_lock
         self._conn: Optional[Any] = None
         self._write_lock = threading.Lock()
@@ -254,7 +260,7 @@ class WheelchairControlGUI:
         self.last_packet_time: Optional[float] = None
 
         # Three-state joystick pipeline:
-        #   latest  — most recent normalized x/y from telemetry
+        #   latest   — most recent normalized x/y from telemetry
         #   filtered — exponential moving average of latest
         #   visual   — per-frame interpolation toward filtered (drives the dot)
         self.latest_x   = 0.0
@@ -269,6 +275,10 @@ class WheelchairControlGUI:
         self.motor_right  = 0.0
         self.motor_active = False
 
+        # motor slider widget references (set in _build_motor_control_panel)
+        self._slider_left:  Optional[tk.Scale] = None
+        self._slider_right: Optional[tk.Scale] = None
+
         self._build_ui()
         self.root.after(self.gui_update_ms, self._gui_frame)
         self.root.after(AGE_UPDATE_MS,      self._tick_age)
@@ -276,40 +286,72 @@ class WheelchairControlGUI:
     # ── Widget construction ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.root.title("Wheelchair Control  v0.6.1")
-        self.root.resizable(False, False)
+        self.root.title("Wheelchair Control  v0.6.2")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Allow the root to distribute any extra fullscreen space to the outer frame.
+        self.root.rowconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
 
         outer = ttk.Frame(self.root, padding=10)
         outer.grid(row=0, column=0, sticky="nsew")
 
-        self._build_status_bar(outer)
+        self._build_status_bar(outer)        # row 0
+        self._build_view_toolbar(outer)      # row 1
 
         joy_frame = ttk.LabelFrame(outer, text="Joystick", padding=8)
-        joy_frame.grid(row=1, column=0, sticky="n", padx=(0, 8), pady=(0, 6))
+        joy_frame.grid(row=2, column=0, sticky="n", padx=(0, 8), pady=(0, 6))
         self._build_joystick_panel(joy_frame)
 
         mon_frame = ttk.LabelFrame(outer, text="Motor Monitor", padding=8)
-        mon_frame.grid(row=1, column=1, sticky="n", padx=(0, 8), pady=(0, 6))
+        mon_frame.grid(row=2, column=1, sticky="n", padx=(0, 8), pady=(0, 6))
         self._build_motor_monitor_panel(mon_frame)
 
         ctrl_frame = ttk.LabelFrame(outer, text="Motor Control", padding=10)
-        ctrl_frame.grid(row=1, column=2, sticky="nsew", pady=(0, 6))
+        ctrl_frame.grid(row=2, column=2, sticky="nsew", pady=(0, 6))
         self._build_motor_control_panel(ctrl_frame)
 
         smooth_frame = ttk.LabelFrame(
             outer, text="Joystick smoothing settings", padding=8)
         smooth_frame.grid(
-            row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+            row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         self._build_smoothing_panel(smooth_frame)
 
-        self._build_safety_panel(outer)
+        self._build_safety_panel(outer)      # row 4
+
+        # Keyboard shortcuts for fullscreen.
+        self.root.bind("<F11>",    lambda _e: self._toggle_fullscreen())
+        self.root.bind("<Escape>", lambda _e: self._exit_fullscreen())
+
+    # ── View toolbar ─────────────────────────────────────────────────────────
+
+    def _build_view_toolbar(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent)
+        toolbar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        ttk.Label(
+            toolbar,
+            text="View:",
+            foreground=COLOR_STOP_FG,
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
+            toolbar,
+            text="Fullscreen  (F11)",
+            command=self._toggle_fullscreen,
+        ).pack(side="left", padx=(0, 4))
+
+        ttk.Button(
+            toolbar,
+            text="Exit Fullscreen  (Esc)",
+            command=self._exit_fullscreen,
+        ).pack(side="left")
 
     # ── Status bar ────────────────────────────────────────────────────────────
 
     def _build_status_bar(self, parent: ttk.Frame) -> None:
         bar = ttk.LabelFrame(parent, text="Connection", padding=6)
-        bar.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        bar.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
 
         self._sv_conn    = tk.StringVar(value="opening serial port…")
         self._sv_fw      = tk.StringVar(value="—")
@@ -380,24 +422,23 @@ class WheelchairControlGUI:
         self._sv_vis_y  = tk.StringVar(value="—")
 
         rows = [
-            ("raw_x",   self._sv_raw_x,  None),
-            ("raw_y",   self._sv_raw_y,  None),
-            ("x",       self._sv_x,      None),
-            ("y",       self._sv_y,      None),
-            ("filt_x",  self._sv_filt_x, COLOR_STOP_FG),
-            ("filt_y",  self._sv_filt_y, COLOR_STOP_FG),
-            ("vis_x",   self._sv_vis_x,  COLOR_STOP_FG),
-            ("vis_y",   self._sv_vis_y,  COLOR_STOP_FG),
+            ("raw_x",  self._sv_raw_x,  None),
+            ("raw_y",  self._sv_raw_y,  None),
+            ("x",      self._sv_x,      None),
+            ("y",      self._sv_y,      None),
+            ("filt_x", self._sv_filt_x, COLOR_STOP_FG),
+            ("filt_y", self._sv_filt_y, COLOR_STOP_FG),
+            ("vis_x",  self._sv_vis_x,  COLOR_STOP_FG),
+            ("vis_y",  self._sv_vis_y,  COLOR_STOP_FG),
         ]
         for row_idx, (lbl, var, fg) in enumerate(rows):
-            lbl_widget = ttk.Label(num, text=f"{lbl}:", width=7, anchor="e")
-            lbl_widget.grid(row=row_idx, column=0, sticky="e",
-                            padx=(0, 6), pady=1)
-            val_widget = ttk.Label(num, textvariable=var, width=10, anchor="w")
-            val_widget.grid(row=row_idx, column=1, sticky="w", pady=1)
+            lbl_w = ttk.Label(num, text=f"{lbl}:", width=7, anchor="e")
+            lbl_w.grid(row=row_idx, column=0, sticky="e", padx=(0, 6), pady=1)
+            val_w = ttk.Label(num, textvariable=var, width=10, anchor="w")
+            val_w.grid(row=row_idx, column=1, sticky="w", pady=1)
             if fg is not None:
-                lbl_widget.configure(foreground=fg)
-                val_widget.configure(foreground=fg)
+                lbl_w.configure(foreground=fg)
+                val_w.configure(foreground=fg)
 
     # ── Motor monitor panel ───────────────────────────────────────────────────
 
@@ -480,7 +521,62 @@ class WheelchairControlGUI:
     # ── Motor control panel ───────────────────────────────────────────────────
 
     def _build_motor_control_panel(self, parent: ttk.LabelFrame) -> None:
-        # ── sliders ───────────────────────────────────────────────────────────
+
+        # ── PWM limit ─────────────────────────────────────────────────────────
+        self._var_pwm_limit     = tk.DoubleVar(value=PWM_LIMIT_DEFAULT)
+        self._sv_pwm_limit_val  = tk.StringVar(value=f"{PWM_LIMIT_DEFAULT:.2f}")
+        self._sv_pwm_limit_warn = tk.StringVar(value="")
+
+        def _fmt_limit(*_: Any) -> None:
+            v = round(self._var_pwm_limit.get(), 2)
+            self._sv_pwm_limit_val.set(f"{v:.2f}")
+
+        self._var_pwm_limit.trace_add("write", _fmt_limit)
+
+        ttk.Label(parent, text="PWM limit:", width=12, anchor="e").grid(
+            row=0, column=0, sticky="e", pady=(4, 0))
+        tk.Scale(
+            parent,
+            variable=self._var_pwm_limit,
+            from_=PWM_LIMIT_MIN,
+            to=PWM_LIMIT_MAX,
+            resolution=0.01,
+            orient="horizontal",
+            length=180,
+            showvalue=False,
+        ).grid(row=0, column=1, sticky="ew", padx=(4, 4), pady=(4, 0))
+        ttk.Label(
+            parent,
+            textvariable=self._sv_pwm_limit_val,
+            width=6, anchor="w",
+            font=("Courier", 10),
+        ).grid(row=0, column=2, sticky="w", pady=(4, 0))
+
+        limit_btns = ttk.Frame(parent)
+        limit_btns.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        ttk.Button(
+            limit_btns, text="Apply PWM Limit",
+            command=self._on_apply_pwm_limit,
+        ).pack(side="left", padx=(0, 4))
+        ttk.Button(
+            limit_btns, text="Reset to 0.30",
+            command=self._on_reset_pwm_limit,
+        ).pack(side="left")
+
+        self._lbl_pwm_warn = ttk.Label(
+            parent,
+            textvariable=self._sv_pwm_limit_warn,
+            foreground=COLOR_WARN,
+            font=("", 8, "bold"),
+            wraplength=280,
+        )
+        self._lbl_pwm_warn.grid(
+            row=2, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+
+        ttk.Separator(parent, orient="horizontal").grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=8)
+
+        # ── Motor sliders ─────────────────────────────────────────────────────
         self._var_left  = tk.DoubleVar(value=0.0)
         self._var_right = tk.DoubleVar(value=0.0)
         self._sv_left_cmd  = tk.StringVar(value="+0.00")
@@ -495,58 +591,61 @@ class WheelchairControlGUI:
         self._var_left.trace_add("write",  _fmt_left)
         self._var_right.trace_add("write", _fmt_right)
 
+        lim = self._pwm_limit
         slider_opts = dict(
-            from_=SLIDER_MIN,
-            to=SLIDER_MAX,
+            from_=-lim,
+            to=lim,
             resolution=0.01,
             orient="horizontal",
             length=180,
             showvalue=False,
         )
 
-        for row, (label, var, sv) in enumerate([
+        for row_offset, (label, var, sv) in enumerate([
             ("Left motor:",  self._var_left,  self._sv_left_cmd),
             ("Right motor:", self._var_right, self._sv_right_cmd),
         ]):
+            row = row_offset + 4
             ttk.Label(parent, text=label).grid(
                 row=row, column=0, sticky="w", pady=(4, 0))
-            tk.Scale(parent, variable=var, **slider_opts).grid(
-                row=row, column=1, sticky="ew", padx=(4, 4), pady=(4, 0))
+            slider = tk.Scale(parent, variable=var, **slider_opts)
+            slider.grid(row=row, column=1, sticky="ew", padx=(4, 4), pady=(4, 0))
             ttk.Label(parent, textvariable=sv, width=6, anchor="w",
                       font=("Courier", 10)).grid(
                 row=row, column=2, sticky="w", pady=(4, 0))
+            if row_offset == 0:
+                self._slider_left  = slider
+            else:
+                self._slider_right = slider
 
         ttk.Separator(parent, orient="horizontal").grid(
-            row=2, column=0, columnspan=3, sticky="ew", pady=8)
+            row=6, column=0, columnspan=3, sticky="ew", pady=8)
 
-        # ── Send Once (single shot) ───────────────────────────────────────────
+        # ── Send Once ─────────────────────────────────────────────────────────
         self._btn_send_once = ttk.Button(
-            parent,
-            text="Send Once",
+            parent, text="Send Once",
             command=self._on_send_once,
             state="disabled",
         )
         self._btn_send_once.grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+            row=7, column=0, columnspan=3, sticky="ew", pady=(0, 4))
 
         # ── Stream buttons ────────────────────────────────────────────────────
         stream_btn_frame = ttk.Frame(parent)
         stream_btn_frame.grid(
-            row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+            row=8, column=0, columnspan=3, sticky="ew", pady=(0, 4))
         stream_btn_frame.columnconfigure(0, weight=1)
         stream_btn_frame.columnconfigure(1, weight=1)
 
         self._btn_start_stream = ttk.Button(
-            stream_btn_frame,
-            text="Start PWM Stream",
+            stream_btn_frame, text="Start PWM Stream",
             command=self._on_start_stream,
             state="disabled",
         )
         self._btn_start_stream.grid(row=0, column=0, sticky="ew", padx=(0, 2))
 
         self._btn_stop_stream = ttk.Button(
-            stream_btn_frame,
-            text="Stop PWM Stream",
+            stream_btn_frame, text="Stop PWM Stream",
             command=self._on_stop_stream,
             state="disabled",
         )
@@ -555,7 +654,7 @@ class WheelchairControlGUI:
         # ── Stream status ─────────────────────────────────────────────────────
         stream_info = ttk.Frame(parent)
         stream_info.grid(
-            row=5, column=0, columnspan=3, sticky="ew", pady=(0, 2))
+            row=9, column=0, columnspan=3, sticky="ew", pady=(0, 2))
 
         self._sv_stream_status = tk.StringVar(value="PWM stream: OFF")
         self._lbl_stream_status = tk.Label(
@@ -573,7 +672,7 @@ class WheelchairControlGUI:
 
         # ── Last transmitted values ───────────────────────────────────────────
         tx_frame = ttk.Frame(parent)
-        tx_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        tx_frame.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
         ttk.Label(tx_frame, text="Last TX:", foreground=COLOR_STOP_FG).pack(
             side="left")
@@ -581,23 +680,19 @@ class WheelchairControlGUI:
             side="left", padx=(8, 2))
         self._sv_stream_left = tk.StringVar(value="+0.00")
         ttk.Label(
-            tx_frame,
-            textvariable=self._sv_stream_left,
-            width=6,
-            font=("Courier", 9),
+            tx_frame, textvariable=self._sv_stream_left,
+            width=6, font=("Courier", 9),
         ).pack(side="left")
         ttk.Label(tx_frame, text="R", foreground=COLOR_STOP_FG).pack(
             side="left", padx=(8, 2))
         self._sv_stream_right = tk.StringVar(value="+0.00")
         ttk.Label(
-            tx_frame,
-            textvariable=self._sv_stream_right,
-            width=6,
-            font=("Courier", 9),
+            tx_frame, textvariable=self._sv_stream_right,
+            width=6, font=("Courier", 9),
         ).pack(side="left")
 
         ttk.Separator(parent, orient="horizontal").grid(
-            row=7, column=0, columnspan=3, sticky="ew", pady=6)
+            row=11, column=0, columnspan=3, sticky="ew", pady=6)
 
         # ── STOP ─────────────────────────────────────────────────────────────
         self._btn_stop = tk.Button(
@@ -614,11 +709,11 @@ class WheelchairControlGUI:
             command=self._on_stop,
         )
         self._btn_stop.grid(
-            row=8, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+            row=12, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
         # ── Zero utilities ────────────────────────────────────────────────────
         util = ttk.Frame(parent)
-        util.grid(row=9, column=0, columnspan=3, sticky="ew")
+        util.grid(row=13, column=0, columnspan=3, sticky="ew")
         for col, (label, cmd) in enumerate([
             ("Zero Left",  self._on_zero_left),
             ("Zero Right", self._on_zero_right),
@@ -632,11 +727,11 @@ class WheelchairControlGUI:
         util.columnconfigure(2, weight=1)
 
         ttk.Separator(parent, orient="horizontal").grid(
-            row=10, column=0, columnspan=3, sticky="ew", pady=8)
+            row=14, column=0, columnspan=3, sticky="ew", pady=8)
 
         # ── Latest response ───────────────────────────────────────────────────
         resp = ttk.LabelFrame(parent, text="Latest Response", padding=4)
-        resp.grid(row=11, column=0, columnspan=3, sticky="ew")
+        resp.grid(row=15, column=0, columnspan=3, sticky="ew")
         self._sv_last_ack = tk.StringVar(value="—")
         self._sv_last_err = tk.StringVar(value="—")
         ttk.Label(resp, text="ACK:", width=5, anchor="e").grid(
@@ -652,7 +747,7 @@ class WheelchairControlGUI:
         self._sv_seq = tk.StringVar(value="seq: 0")
         ttk.Label(parent, textvariable=self._sv_seq,
                   foreground=COLOR_STOP_FG, font=("", 8)).grid(
-            row=12, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            row=16, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     # ── Smoothing settings panel ──────────────────────────────────────────────
 
@@ -663,23 +758,18 @@ class WheelchairControlGUI:
         self._var_smooth_interp = tk.DoubleVar(value=self.interp_alpha)
         self._var_smooth_ms     = tk.IntVar(value=self.gui_update_ms)
 
-        self._sv_smooth_filter = tk.StringVar(
-            value=f"{self.filter_alpha:.2f}")
-        self._sv_smooth_interp = tk.StringVar(
-            value=f"{self.interp_alpha:.2f}")
-        self._sv_smooth_ms     = tk.StringVar(
-            value=str(self.gui_update_ms))
+        self._sv_smooth_filter = tk.StringVar(value=f"{self.filter_alpha:.2f}")
+        self._sv_smooth_interp = tk.StringVar(value=f"{self.interp_alpha:.2f}")
+        self._sv_smooth_ms     = tk.StringVar(value=str(self.gui_update_ms))
 
         def _on_filter(*_: Any) -> None:
             v = round(self._var_smooth_filter.get(), 2)
-            self.filter_alpha = max(SMOOTHING_ALPHA_MIN,
-                                    min(SMOOTHING_ALPHA_MAX, v))
+            self.filter_alpha = max(SMOOTHING_ALPHA_MIN, min(SMOOTHING_ALPHA_MAX, v))
             self._sv_smooth_filter.set(f"{self.filter_alpha:.2f}")
 
         def _on_interp(*_: Any) -> None:
             v = round(self._var_smooth_interp.get(), 2)
-            self.interp_alpha = max(SMOOTHING_ALPHA_MIN,
-                                    min(SMOOTHING_ALPHA_MAX, v))
+            self.interp_alpha = max(SMOOTHING_ALPHA_MIN, min(SMOOTHING_ALPHA_MAX, v))
             self._sv_smooth_interp.set(f"{self.interp_alpha:.2f}")
 
         def _on_ms(*_: Any) -> None:
@@ -729,17 +819,12 @@ class WheelchairControlGUI:
                 showvalue=False,
             ).grid(row=row_idx, column=1, sticky="ew", padx=(0, 4), pady=3)
             ttk.Label(
-                parent,
-                textvariable=sv,
-                width=6,
-                anchor="w",
-                font=("Courier", 9),
+                parent, textvariable=sv,
+                width=6, anchor="w", font=("Courier", 9),
             ).grid(row=row_idx, column=2, sticky="w", padx=(0, 12), pady=3)
             ttk.Label(
-                parent,
-                text=hint,
-                foreground=COLOR_STOP_FG,
-                font=("", 8),
+                parent, text=hint,
+                foreground=COLOR_STOP_FG, font=("", 8),
             ).grid(row=row_idx, column=3, sticky="w", pady=3)
 
         ttk.Button(
@@ -752,13 +837,13 @@ class WheelchairControlGUI:
 
     def _build_safety_panel(self, parent: ttk.Frame) -> None:
         safety = ttk.LabelFrame(parent, text="Safety", padding=6)
-        safety.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        safety.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
         warn = tk.Label(
             safety,
             text=(
                 "⚠  Do not use with wheels on the ground. "
-                "v0.6.1 is for suspended / no-load PWM testing only."
+                "v0.6.2 is for suspended / no-load PWM testing only."
             ),
             foreground=COLOR_WARN,
             font=("", 9, "bold"),
@@ -831,7 +916,6 @@ class WheelchairControlGUI:
             self._sv_last_rx.set(f"ERR  code={code}")
             return
 
-        # Joystick packet — store raw display values immediately.
         raw_x = pkt.get("raw_x")
         raw_y = pkt.get("raw_y")
         self._sv_raw_x.set("—" if raw_x is None else str(raw_x))
@@ -842,7 +926,6 @@ class WheelchairControlGUI:
         self._sv_x.set("—" if x is None else f"{x:+.3f}")
         self._sv_y.set("—" if y is None else f"{y:+.3f}")
 
-        # Store latest normalized values; filtering runs in _gui_frame.
         if x is not None:
             self.latest_x = x
         if y is not None:
@@ -859,21 +942,14 @@ class WheelchairControlGUI:
     def _gui_frame(self) -> None:
         self._process_queue()
 
-        # Stage 1: EMA filter (latest → filtered)
-        self.filtered_x = exp_step(
-            self.filtered_x, self.latest_x, self.filter_alpha)
-        self.filtered_y = exp_step(
-            self.filtered_y, self.latest_y, self.filter_alpha)
+        self.filtered_x = exp_step(self.filtered_x, self.latest_x, self.filter_alpha)
+        self.filtered_y = exp_step(self.filtered_y, self.latest_y, self.filter_alpha)
 
-        # Stage 2: per-frame visual interpolation (filtered → visual)
-        self.visual_x = exp_step(
-            self.visual_x, self.filtered_x, self.interp_alpha)
-        self.visual_y = exp_step(
-            self.visual_y, self.filtered_y, self.interp_alpha)
+        self.visual_x = exp_step(self.visual_x, self.filtered_x, self.interp_alpha)
+        self.visual_y = exp_step(self.visual_y, self.filtered_y, self.interp_alpha)
 
         self._move_dot(self.visual_x, self.visual_y)
 
-        # Update smoothing state display in the joystick panel.
         self._sv_filt_x.set(f"{self.filtered_x:+.3f}")
         self._sv_filt_y.set(f"{self.filtered_y:+.3f}")
         self._sv_vis_x.set(f"{self.visual_x:+.3f}")
@@ -898,7 +974,6 @@ class WheelchairControlGUI:
             self._lbl_active.configure(foreground=COLOR_STOP_FG)
 
         if not self.closing:
-            # Re-read gui_update_ms each frame so live slider changes take effect.
             self.root.after(self.gui_update_ms, self._gui_frame)
 
     def _move_dot(self, x: float, y: float) -> None:
@@ -988,7 +1063,6 @@ class WheelchairControlGUI:
             PWM_STREAM_PERIOD_MS, self._stream_tick)
 
     def _update_stream_ui(self) -> None:
-        """Synchronise all stream-related button states and labels."""
         safety    = self._safety_var.get()
         streaming = self._streaming
 
@@ -1006,7 +1080,42 @@ class WheelchairControlGUI:
             self._sv_stream_status.set("PWM stream: OFF")
             self._lbl_stream_status.configure(foreground=COLOR_STOP_FG)
 
-    # ── Button handlers ───────────────────────────────────────────────────────
+    # ── Button / keyboard handlers ────────────────────────────────────────────
+
+    def _toggle_fullscreen(self) -> None:
+        is_fs = bool(self.root.attributes("-fullscreen"))
+        self.root.attributes("-fullscreen", not is_fs)
+
+    def _exit_fullscreen(self) -> None:
+        self.root.attributes("-fullscreen", False)
+
+    def _on_apply_pwm_limit(self) -> None:
+        new_limit = round(self._var_pwm_limit.get(), 2)
+        new_limit = max(PWM_LIMIT_MIN, min(PWM_LIMIT_MAX, new_limit))
+        self._pwm_limit = new_limit
+
+        assert self._slider_left  is not None
+        assert self._slider_right is not None
+        self._slider_left.configure(from_=-new_limit, to=new_limit)
+        self._slider_right.configure(from_=-new_limit, to=new_limit)
+
+        # Clamp current slider values into the new range.
+        for var in (self._var_left, self._var_right):
+            v = var.get()
+            var.set(max(-new_limit, min(new_limit, v)))
+
+        if new_limit > PWM_LIMIT_WARN_THRESHOLD:
+            self._sv_pwm_limit_warn.set(
+                f"⚠  PWM limit above {PWM_LIMIT_WARN_THRESHOLD:.2f} — "
+                "use only with suspended motor and controlled test conditions.")
+        else:
+            self._sv_pwm_limit_warn.set("")
+
+        self._sv_pwm_limit_val.set(f"{new_limit:.2f}")
+
+    def _on_reset_pwm_limit(self) -> None:
+        self._var_pwm_limit.set(PWM_LIMIT_DEFAULT)
+        self._on_apply_pwm_limit()
 
     def _on_send_once(self) -> None:
         left  = round(self._var_left.get(),  2)
@@ -1054,8 +1163,6 @@ class WheelchairControlGUI:
         self._var_smooth_filter.set(FILTER_ALPHA)
         self._var_smooth_interp.set(INTERP_ALPHA)
         self._var_smooth_ms.set(GUI_UPDATE_MS)
-        # Traces fire automatically and update self.filter_alpha / interp_alpha /
-        # gui_update_ms together with the display StringVars.
 
     # ── Close ─────────────────────────────────────────────────────────────────
 

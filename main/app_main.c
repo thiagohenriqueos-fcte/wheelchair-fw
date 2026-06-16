@@ -18,8 +18,12 @@
 /* Motor test watchdog: stop all PWM if no fresh command arrives within this window. */
 #define MOTOR_TEST_TIMEOUT_MS  500
 
-/* Conservative duty-cycle cap for physical motor tests with a suspended motor. */
-#define MOTOR_TEST_MAX_DUTY    0.30f
+/*
+ * Firmware absolute duty-cycle cap.  Set to 1.0 so the GUI is the
+ * operator-facing safety limit (default GUI limit: 0.30).  The 500 ms
+ * watchdog and STOP command remain active regardless of this constant.
+ */
+#define MOTOR_TEST_MAX_DUTY    1.0f
 
 void app_main(void)
 {
