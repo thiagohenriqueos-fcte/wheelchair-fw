@@ -1,6 +1,6 @@
 # Firmware Roadmap
 
-Versions v0.1 through v0.6 (including v0.5.1, v0.5.2, and v0.5.3) are implemented in the current repository state.
+Versions v0.1 through v0.6.1 (including v0.5.1, v0.5.2, v0.5.3, and v0.6.1) are implemented in the current repository state.
 
 | Version | Scope | Status |
 | --- | --- | --- |
@@ -15,6 +15,7 @@ Versions v0.1 through v0.6 (including v0.5.1, v0.5.2, and v0.5.3) are implemente
 | v0.5.2 | Integrated control GUI: telemetry + PWM commands in one window | Complete |
 | v0.5.3 | Continuous PWM stream mode at 10 Hz (host-side only) | Complete |
 | v0.6 | PWM test with a suspended motor | Complete |
+| v0.6.1 | Live-adjustable joystick smoothing controls in GUI (host-side only) | Complete |
 | v0.7 | PCNT encoder reading | Planned |
 | v0.8 | RPM and speed calculation | Planned |
 | v0.9 | Open-loop joystick-to-PWM control | Planned |

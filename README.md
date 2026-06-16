@@ -167,7 +167,7 @@ Read and validate the JSON stream without sending commands:
 python3 scripts/read_json_serial.py /dev/ttyACM0
 ```
 
-Integrated control GUI (v0.5.3 — monitor, send commands, and stream PWM continuously):
+Integrated control GUI (v0.6.1 — monitor, send commands, stream PWM, and tune joystick smoothing live):
 
 ```bash
 python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
@@ -187,6 +187,19 @@ and zeros both sliders. Closing the window stops streaming and sends a `stop`
 command before releasing the serial port.
 
 All stream-related buttons are disabled until the safety checkbox is ticked.
+
+A **Joystick smoothing settings** panel lets you tune three visualization
+parameters at runtime without restarting the GUI:
+
+- **Filter alpha** (0.01–1.00, default 0.25): exponential moving average applied
+  to incoming normalized x/y telemetry. 1.0 = raw, lower = smoother but slower.
+- **Interpolation alpha** (0.01–1.00, default 0.20): per-frame interpolation of
+  the joystick dot toward the filtered value. 1.0 = instant, lower = smooth lag.
+- **Update interval** (10–100 ms, default 33 ms): Tkinter frame period.
+
+The joystick panel also shows `filt_x/y` (filtered) and `vis_x/y` (visual) so
+you can observe each stage of the smoothing pipeline. These controls affect
+visualization only and have no effect on motor commands.
 
 Default slider range: ±0.30 (conservative, for suspended-motor testing).
 Full ±1.0 range requires editing `SLIDER_MIN` / `SLIDER_MAX` in the script.
