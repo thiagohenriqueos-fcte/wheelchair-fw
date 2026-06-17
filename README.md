@@ -1,13 +1,22 @@
 # Wheelchair ESP32-S3 Firmware
 
 ESP-IDF firmware and Linux host tools for an ESP32-S3-based wheelchair
-control system.
+control system, including a host-side ROS 2 layer for LIDAR-assisted obstacle
+avoidance on a Raspberry Pi.
 
-The current project release is **v0.7.0**. This version adds quadrature encoder
+The current firmware release is **v0.7.0**. This version adds quadrature encoder
 reading via the ESP32-S3 PCNT peripheral. Encoder counts and per-cycle deltas
 appear in joystick telemetry. The motor watchdog, STOP command, and GUI PWM
 limit remain unchanged from v0.6.2. Do not connect motors during encoder
 validation unless they are suspended off the ground.
+
+A **host-side ROS 2 semi-assist layer** (Raspberry Pi 5 + RPLIDAR C1) has been
+added on top of this firmware. It does **not** modify the firmware: it speaks
+the same newline-delimited JSON protocol over USB serial. See
+[ROS 2 host-side layer](#ros-2-host-side-layer-semi-assisted-lidar-control)
+below, [docs/ROS2_INTEGRATION.md](docs/ROS2_INTEGRATION.md), and
+[docs/TEST_PLAN_ROS2_ASSIST.md](docs/TEST_PLAN_ROS2_ASSIST.md). This layer is
+experimental and pending manual validation with a suspended motor.
 
 ## Firmware behavior
 
@@ -28,16 +37,18 @@ The firmware:
   on GPIO6/GPIO7 (4× decoding, 1 µs glitch filter);
 - never drives RPWM and LPWM simultaneously for the same motor channel;
 - stops all PWM if no `pwm_test` command is received within 500 ms (watchdog);
-- accepts duty-cycle commands up to ±1.0; the GUI PWM limit (default 0.30)
-  is the operator-facing safety gate — do not raise it without a suspended motor.
+- accepts duty-cycle commands up to ±1.0; the operator-facing safety gate
+  (default 0.30, set by the GUI or the ROS 2 bridge) must not be raised
+  without a suspended motor.
 
 The joystick Y axis is inverted in software so that upward movement maps to
 positive Y and downward movement maps to negative Y. Raw ADC readings are not
 modified. A deadzone of `0.08` is applied around the default raw center of
 `2048`.
 
-Version 0.7 does **not** implement PI control, closed-loop motor control,
-odometry, or ROS 2.
+The firmware itself does **not** implement PI control, closed-loop motor
+control, odometry, or ROS 2. ROS 2 integration is provided host-side on the
+Raspberry Pi (see below) and does not change the firmware.
 
 ## JSON protocol
 
@@ -56,7 +67,8 @@ Stop command:
 ```
 
 `v` is the requested linear velocity in m/s and `w` is the requested angular
-velocity in rad/s. They are stored but not acted upon in v0.5.
+velocity in rad/s. They are stored but not acted upon by the firmware (the
+v0.9 open-loop mapping is performed host-side by the ROS 2 bridge).
 
 PWM test command:
 
@@ -65,9 +77,10 @@ PWM test command:
 ```
 
 `left` and `right` are duty-cycle fractions. Positive drives RPWM; negative
-drives LPWM. The complementary output is held at zero. The firmware clamps
-values to ±0.30. If no fresh `pwm_test` command arrives within 500 ms, all
-PWM outputs are forced low automatically.
+drives LPWM. The complementary output is held at zero. The firmware hard clamp
+is ±1.0; the operator-facing safety gate (default 0.30) lives in the GUI and in
+the ROS 2 bridge (`max_duty`). If no fresh `pwm_test` command arrives within
+500 ms, all PWM outputs are forced low automatically.
 
 Successful commands receive an ACK:
 
@@ -236,6 +249,52 @@ python3 scripts/joystick_gui.py /dev/ttyACM0
 Tkinter is supplied by the system Python package and is not listed in
 `requirements-dev.txt`.
 
+## ROS 2 host-side layer (semi-assisted LIDAR control)
+
+A Raspberry Pi 5 (Ubuntu 24.04, ROS 2 Jazzy) runs a semi-assisted obstacle
+avoidance layer on top of the firmware. **The joystick remains the primary
+command**; the LIDAR only modulates it — passing the command through, slowing
+and steering within a bounded window, or stopping. The system never adds motion
+the user did not request. This is assistive, **not autonomous**, control.
+
+Architecture:
+
+```
+                          /joystick_cmd_vel
+   [ ESP32-S3 ] --serial--> [ esp_bridge ] -----------------+
+       ^  | telemetry            |  ^                        |
+       |  +----------------------+  | /cmd_vel               v
+       |     pwm_test / stop        |               [ shared_control ]
+       +----------------------------+                        ^ /scan
+                                                    [ sllidar_ros2 (C1) ]
+```
+
+Components (host-side only; firmware unchanged):
+
+- **`sllidar_ros2`** — RPLIDAR C1 driver, publishes `/scan` (baud 460800).
+- **`esp_bridge`** — serial ↔ ROS 2 bridge. Decodes the joystick into
+  `/joystick_cmd_vel`, converts `/cmd_vel` into per-wheel `pwm_test` (open-loop,
+  the v0.9 role), feeds the 500 ms watchdog at 20 Hz, and republishes telemetry.
+- **`shared_control`** — fuses joystick intent and `/scan` via a **minimum-cost**
+  decision: pass through, deviate, or stop the forward motion.
+
+Run the full pipeline (RPLIDAR C1 = baud 460800), with the motor suspended:
+
+```bash
+ros2 launch wheelchair_ros wheelchair_assist.launch.py \
+    esp_port:=/dev/ttyACM0 lidar_port:=/dev/ttyUSB0 lidar_baud:=460800
+```
+
+For first contact, run with `assist_gain:=0.0` (stop-only, no steering) before
+enabling deviation. Safety layers are independent: firmware watchdog (500 ms),
+bridge command timeout, sensor timeout, stop-on-exit, and the `max_duty` gate.
+
+Limitations: the front LIDAR does not see behind (reverse is unprotected), the
+scan is a single 2D plane (low obstacles and drop-offs are not seen), and the
+velocity-to-PWM mapping is uncalibrated until RPM calibration (v0.8). Full
+detail and parameters are in [docs/ROS2_INTEGRATION.md](docs/ROS2_INTEGRATION.md);
+validation steps are in [docs/TEST_PLAN_ROS2_ASSIST.md](docs/TEST_PLAN_ROS2_ASSIST.md).
+
 ## Project layout
 
 ```text
@@ -265,6 +324,15 @@ Tkinter is supplied by the system Python package and is not listed in
 │   │   └── json_telemetry.h
 │   └── version.h
 ├── docs/
+├── ros2/
+│   └── wheelchair_ros/
+│       ├── package.xml
+│       ├── setup.py
+│       ├── launch/
+│       │   └── wheelchair_assist.launch.py
+│       └── wheelchair_ros/
+│           ├── esp_bridge_node.py
+│           └── shared_control_node.py
 └── scripts/
     ├── joystick_gui.py
     ├── read_json_serial.py
