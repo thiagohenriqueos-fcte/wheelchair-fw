@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "encoder_pcnt.h"
 #include "json_command.h"
 #include "json_telemetry.h"
 #include "joystick_adc.h"
@@ -47,6 +48,9 @@ void app_main(void)
         receiver_ready = json_command_start_receiver() == ESP_OK;
     }
 
+    const esp_err_t encoder_init_result = encoder_pcnt_init();
+    const bool encoder_ready = encoder_init_result == ESP_OK;
+
     json_telemetry_send_status("boot", "ok", FIRMWARE_NAME);
     json_telemetry_send_status(
         "joystick_adc",
@@ -60,6 +64,10 @@ void app_main(void)
         "command_receiver",
         receiver_ready ? "ok" : "error",
         receiver_ready ? NULL : "initialization_failed");
+    json_telemetry_send_status(
+        "encoder_pcnt",
+        encoder_ready ? "ok" : "error",
+        encoder_ready ? NULL : esp_err_to_name(encoder_init_result));
 
     TickType_t last_wake_time = xTaskGetTickCount();
     TickType_t last_heartbeat_time = last_wake_time;
@@ -116,12 +124,19 @@ void app_main(void)
                     }
                 }
 
+                encoder_pcnt_sample_t enc_sample = {0};
+                if (encoder_ready) {
+                    encoder_pcnt_read_sample(&enc_sample);
+                }
+
                 telemetry_sequence++;
                 json_telemetry_send_joystick(
                     telemetry_sequence,
                     &sample,
                     &command,
-                    &motor_test);
+                    &motor_test,
+                    encoder_ready ? &enc_sample : NULL,
+                    encoder_ready);
             }
         }
     }

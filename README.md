@@ -3,12 +3,11 @@
 ESP-IDF firmware and Linux host tools for an ESP32-S3-based wheelchair
 control system.
 
-The current project release is **v0.6.2**. This version tests MCPWM output
-with a real IBT-2 H-bridge and motor physically connected. The motor must be
-suspended (wheel off the ground, no load) for all v0.6 tests. A 500 ms
-command watchdog stops all PWM automatically if no fresh `pwm_test` command
-arrives. The GUI PWM limit defaults to 0.30; the firmware accepts the full
-±1.0 range but operator safety relies on the GUI limit and the STOP button.
+The current project release is **v0.7.0**. This version adds quadrature encoder
+reading via the ESP32-S3 PCNT peripheral. Encoder counts and per-cycle deltas
+appear in joystick telemetry. The motor watchdog, STOP command, and GUI PWM
+limit remain unchanged from v0.6.2. Do not connect motors during encoder
+validation unless they are suspended off the ground.
 
 ## Firmware behavior
 
@@ -25,6 +24,8 @@ The firmware:
 - includes the latest command and motor test state in joystick telemetry;
 - generates MCPWM PWM signals on GPIO10 (left RPWM), GPIO11 (left LPWM),
   GPIO12 (right RPWM), GPIO13 (right LPWM) at 25 kHz;
+- reads two quadrature encoders via PCNT: left A/B on GPIO4/GPIO5, right A/B
+  on GPIO6/GPIO7 (4× decoding, 1 µs glitch filter);
 - never drives RPWM and LPWM simultaneously for the same motor channel;
 - stops all PWM if no `pwm_test` command is received within 500 ms (watchdog);
 - accepts duty-cycle commands up to ±1.0; the GUI PWM limit (default 0.30)
@@ -35,8 +36,8 @@ positive Y and downward movement maps to negative Y. Raw ADC readings are not
 modified. A deadzone of `0.08` is applied around the default raw center of
 `2048`.
 
-Version 0.6 does **not** implement encoders, PI control, closed-loop motor
-control, or ROS 2.
+Version 0.7 does **not** implement PI control, closed-loop motor control,
+odometry, or ROS 2.
 
 ## JSON protocol
 
@@ -80,16 +81,21 @@ Malformed JSON, unknown packet types, and invalid fields receive an error:
 {"type":"err","seq":2,"code":"invalid_json","status":"error"}
 ```
 
-Joystick telemetry includes the latest command and motor test state:
+Joystick telemetry includes the latest command, motor test state, and encoder counts:
 
 ```json
-{"type":"joy","seq":10,"t_ms":12345,"fw":"0.6.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.0,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"motor_left":0.15,"motor_right":0.0,"motor_test_active":true,"status":"ok"}
+{"type":"joy","seq":10,"t_ms":12345,"fw":"0.7.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.0,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"motor_left":0.15,"motor_right":0.0,"motor_test_active":true,"status":"ok","enc_left_count":1234,"enc_right_count":1230,"enc_left_delta":42,"enc_right_delta":41,"enc_status":"ok"}
 ```
 
 Before the first valid command, `cmd_valid` is `false`, command values are
 zero, and `last_cmd_age_ms` is `null`. `motor_test_active` is `false` when no
 `pwm_test` command has been received, when a `stop` command clears the state,
 or when the 500 ms watchdog fires.
+
+`enc_left_count` / `enc_right_count` are running 32-bit totals since boot.
+`enc_left_delta` / `enc_right_delta` are counts accumulated in the current
+50 ms sample period. If encoder init failed, only `enc_status: "error"` is
+present.
 
 ## Joystick wiring
 
@@ -242,6 +248,8 @@ Tkinter is supplied by the system Python package and is not listed in
 │   ├── CMakeLists.txt
 │   ├── app_main.c
 │   ├── drivers/
+│   │   ├── encoder_pcnt.c
+│   │   ├── encoder_pcnt.h
 │   │   ├── joystick_adc.c
 │   │   ├── joystick_adc.h
 │   │   ├── motor_pwm.c

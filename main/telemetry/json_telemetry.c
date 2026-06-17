@@ -91,7 +91,9 @@ esp_err_t json_telemetry_send_joystick(
     uint32_t sequence,
     const joystick_adc_sample_t *sample,
     const motion_command_t *command,
-    const motor_test_command_t *motor_test)
+    const motor_test_command_t *motor_test,
+    const encoder_pcnt_sample_t *encoder,
+    bool encoder_ok)
 {
     if (sample == NULL || command == NULL || motor_test == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -132,6 +134,20 @@ esp_err_t json_telemetry_send_joystick(
         packet_complete =
             packet_complete &&
             cJSON_AddNullToObject(packet, "last_cmd_age_ms") != NULL;
+    }
+
+    if (encoder_ok && encoder != NULL) {
+        packet_complete =
+            packet_complete &&
+            cJSON_AddNumberToObject(packet, "enc_left_count",  encoder->left_count)  != NULL &&
+            cJSON_AddNumberToObject(packet, "enc_right_count", encoder->right_count) != NULL &&
+            cJSON_AddNumberToObject(packet, "enc_left_delta",  encoder->left_delta)  != NULL &&
+            cJSON_AddNumberToObject(packet, "enc_right_delta", encoder->right_delta) != NULL &&
+            cJSON_AddStringToObject(packet, "enc_status", "ok") != NULL;
+    } else {
+        packet_complete =
+            packet_complete &&
+            cJSON_AddStringToObject(packet, "enc_status", "error") != NULL;
     }
 
     if (!packet_complete) {
