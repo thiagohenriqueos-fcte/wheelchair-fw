@@ -18,6 +18,8 @@ Versions v0.1 through v0.6.2 (including v0.5.1, v0.5.2, v0.5.3, v0.6.1, and v0.6
 | v0.6.1 | Live-adjustable joystick smoothing controls in GUI (host-side only) | Complete |
 | v0.6.2 | Fullscreen GUI, user-configurable PWM limit, 25 kHz MCPWM frequency | Complete |
 | v0.7 | PCNT encoder reading | Complete |
+| v0.7.1 | Encoder velocity GUI with smoothing pipeline | Complete |
+| v0.7.2 | Modern dark-theme GUI redesign (ttkbootstrap) | Complete |
 | v0.8 | RPM and speed calculation | Planned |
 | v0.9 | Open-loop joystick-to-PWM control | Planned |
 | v1.0 | Closed-loop PI control for one wheel | Planned |
