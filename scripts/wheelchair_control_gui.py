@@ -8,11 +8,13 @@ v0.5.3 adds a continuous PWM stream mode.
 v0.6.1 adds live-adjustable joystick smoothing controls.
 v0.6.2 adds fullscreen support, a user-configurable PWM limit, and documents
 the 25 kHz firmware PWM frequency.
+v0.7.1 adds real-time encoder angular velocity display with filter/interpolation
+pipeline and a scrollable window.
 
 Usage:
     python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
 
-WARNING: v0.6.2 is for suspended / no-load PWM testing ONLY.
+WARNING: v0.7.x is for suspended / no-load PWM testing ONLY.
          Do not use with wheels on the ground or motors under any load.
          The GUI PWM limit defaults to 0.30 and must only be raised for
          controlled suspended-motor tests.
@@ -32,11 +34,9 @@ from typing import Any, Dict, Optional, Tuple
 
 # ── Safety / Range ────────────────────────────────────────────────────────────
 
-# Default PWM limit presented to the operator.  Raise only for suspended tests.
-PWM_LIMIT_DEFAULT = 0.30
-PWM_LIMIT_MIN     = 0.00
-PWM_LIMIT_MAX     = 1.00
-# Threshold above which a safety warning is displayed in the GUI.
+PWM_LIMIT_DEFAULT        = 0.30
+PWM_LIMIT_MIN            = 0.00
+PWM_LIMIT_MAX            = 1.00
 PWM_LIMIT_WARN_THRESHOLD = 0.30
 
 
@@ -51,7 +51,7 @@ BAR_H    = 28
 BAR_HALF = BAR_W // 2
 
 
-# ── Timing / smoothing defaults ────────────────────────────────────────────────
+# ── Timing / smoothing defaults ───────────────────────────────────────────────
 
 FILTER_ALPHA  = 0.25
 INTERP_ALPHA  = 0.20
@@ -63,9 +63,23 @@ SMOOTHING_ALPHA_MAX = 1.0
 GUI_MS_MIN = 10
 GUI_MS_MAX = 100
 
-# Continuous PWM stream rate.
 PWM_STREAM_HZ        = 10
-PWM_STREAM_PERIOD_MS = 1000 // PWM_STREAM_HZ   # 100 ms at 10 Hz
+PWM_STREAM_PERIOD_MS = 1000 // PWM_STREAM_HZ
+
+
+# ── Encoder constants ─────────────────────────────────────────────────────────
+
+ENCODER_PPR            = 2000           # pulses per revolution (physical)
+ENCODER_COUNTS_PER_REV = ENCODER_PPR * 4  # 4× PCNT quadrature = 8000 counts/rev
+ENCODER_DT             = 0.050         # firmware sample period in seconds
+
+TWO_PI          = 2.0 * math.pi
+OMEGA_PER_COUNT = TWO_PI / (ENCODER_COUNTS_PER_REV * ENCODER_DT)
+# = 2π / (8000 × 0.050) ≈ 0.015708 rad/s per count
+
+ENC_FILTER_ALPHA = 0.30
+ENC_INTERP_ALPHA = 0.20
+ENC_MAX_OMEGA    = 50.0   # rad/s for bar full-scale (~478 RPM)
 
 
 # ── Colours ───────────────────────────────────────────────────────────────────
@@ -186,11 +200,6 @@ def serial_reader(
     event_queue: "queue.Queue[Tuple[str, Any]]",
     stop_event: threading.Event,
 ) -> None:
-    """Read lines from serial and route them to the event queue.
-
-    Also passes the live Serial object back to the main thread so it can
-    write commands without opening a second connection.
-    """
     try:
         with serial_module.Serial(port=port, baudrate=baud, timeout=0.2) as conn:
             event_queue.put(("conn_ready", conn))
@@ -242,27 +251,20 @@ class WheelchairControlGUI:
         self.interp_alpha  = interp_alpha
         self.gui_update_ms = gui_update_ms
 
-        # currently applied PWM limit (operator-facing safety gate)
         self._pwm_limit = PWM_LIMIT_DEFAULT
 
-        # shared serial connection — written by main thread only, under _write_lock
         self._conn: Optional[Any] = None
         self._write_lock = threading.Lock()
         self._seq = 0
 
-        # continuous PWM stream state
         self._streaming: bool = False
         self._stream_after_id: Optional[str] = None
 
-        # counters / timing
         self.valid_packets   = 0
         self.invalid_packets = 0
         self.last_packet_time: Optional[float] = None
 
-        # Three-state joystick pipeline:
-        #   latest   — most recent normalized x/y from telemetry
-        #   filtered — exponential moving average of latest
-        #   visual   — per-frame interpolation toward filtered (drives the dot)
+        # Three-state joystick pipeline
         self.latest_x   = 0.0
         self.latest_y   = 0.0
         self.filtered_x = 0.0
@@ -270,14 +272,31 @@ class WheelchairControlGUI:
         self.visual_x   = 0.0
         self.visual_y   = 0.0
 
-        # motor state from telemetry
         self.motor_left   = 0.0
         self.motor_right  = 0.0
         self.motor_active = False
 
-        # motor slider widget references (set in _build_motor_control_panel)
         self._slider_left:  Optional[tk.Scale] = None
         self._slider_right: Optional[tk.Scale] = None
+
+        # Three-state encoder omega pipeline
+        self.latest_omega_left    = 0.0
+        self.latest_omega_right   = 0.0
+        self.filtered_omega_left  = 0.0
+        self.filtered_omega_right = 0.0
+        self.visual_omega_left    = 0.0
+        self.visual_omega_right   = 0.0
+
+        self.enc_left_count  = 0
+        self.enc_right_count = 0
+        self.enc_left_delta  = 0
+        self.enc_right_delta = 0
+        self.enc_status      = "—"
+        self.enc_ok          = False
+
+        self.enc_filter_alpha = ENC_FILTER_ALPHA
+        self.enc_interp_alpha = ENC_INTERP_ALPHA
+        self.enc_max_omega    = ENC_MAX_OMEGA
 
         self._build_ui()
         self.root.after(self.gui_update_ms, self._gui_frame)
@@ -286,18 +305,39 @@ class WheelchairControlGUI:
     # ── Widget construction ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.root.title("Wheelchair Control  v0.6.2")
+        self.root.title("Wheelchair Control  v0.7.1")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Allow the root to distribute any extra fullscreen space to the outer frame.
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
 
-        outer = ttk.Frame(self.root, padding=10)
-        outer.grid(row=0, column=0, sticky="nsew")
+        # ── Scrollable container ──────────────────────────────────────────
+        container = ttk.Frame(self.root)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
 
-        self._build_status_bar(outer)        # row 0
-        self._build_view_toolbar(outer)      # row 1
+        self._scroll_canvas = tk.Canvas(container, highlightthickness=0)
+        self._scroll_canvas.grid(row=0, column=0, sticky="nsew")
+
+        vscroll = ttk.Scrollbar(
+            container, orient="vertical", command=self._scroll_canvas.yview)
+        vscroll.grid(row=0, column=1, sticky="ns")
+        self._scroll_canvas.configure(yscrollcommand=vscroll.set)
+
+        outer = ttk.Frame(self._scroll_canvas, padding=10)
+        self._canvas_win_id = self._scroll_canvas.create_window(
+            (0, 0), window=outer, anchor="nw")
+
+        outer.bind("<Configure>", self._on_inner_configure)
+        self._scroll_canvas.bind("<Configure>", self._on_canvas_configure)
+
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._scroll_canvas.bind_all(seq, self._on_mousewheel)
+
+        # ── Content panels ────────────────────────────────────────────────
+        self._build_status_bar(outer)     # row 0
+        self._build_view_toolbar(outer)   # row 1
 
         joy_frame = ttk.LabelFrame(outer, text="Joystick", padding=8)
         joy_frame.grid(row=2, column=0, sticky="n", padx=(0, 8), pady=(0, 6))
@@ -317,11 +357,40 @@ class WheelchairControlGUI:
             row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         self._build_smoothing_panel(smooth_frame)
 
-        self._build_safety_panel(outer)      # row 4
+        enc_frame = ttk.LabelFrame(
+            outer, text="Encoder  (2000 PPR / 8000 counts·rev⁻¹)", padding=8)
+        enc_frame.grid(
+            row=4, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        self._build_encoder_panel(enc_frame)
 
-        # Keyboard shortcuts for fullscreen.
+        enc_smooth_frame = ttk.LabelFrame(
+            outer, text="Encoder smoothing settings", padding=8)
+        enc_smooth_frame.grid(
+            row=5, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        self._build_encoder_smoothing_panel(enc_smooth_frame)
+
+        self._build_safety_panel(outer)   # row 6
+
         self.root.bind("<F11>",    lambda _e: self._toggle_fullscreen())
         self.root.bind("<Escape>", lambda _e: self._exit_fullscreen())
+
+    # ── Scroll helpers ────────────────────────────────────────────────────────
+
+    def _on_inner_configure(self, _event: Any) -> None:
+        self._scroll_canvas.configure(
+            scrollregion=self._scroll_canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: Any) -> None:
+        self._scroll_canvas.itemconfigure(self._canvas_win_id, width=event.width)
+
+    def _on_mousewheel(self, event: Any) -> None:
+        if event.num == 4:
+            self._scroll_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self._scroll_canvas.yview_scroll(1, "units")
+        else:
+            self._scroll_canvas.yview_scroll(
+                int(-1 * (event.delta / 120)), "units")
 
     # ── View toolbar ─────────────────────────────────────────────────────────
 
@@ -329,21 +398,14 @@ class WheelchairControlGUI:
         toolbar = ttk.Frame(parent)
         toolbar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 4))
 
-        ttk.Label(
-            toolbar,
-            text="View:",
-            foreground=COLOR_STOP_FG,
-        ).pack(side="left", padx=(0, 6))
-
+        ttk.Label(toolbar, text="View:", foreground=COLOR_STOP_FG).pack(
+            side="left", padx=(0, 6))
         ttk.Button(
-            toolbar,
-            text="Fullscreen  (F11)",
+            toolbar, text="Fullscreen  (F11)",
             command=self._toggle_fullscreen,
         ).pack(side="left", padx=(0, 4))
-
         ttk.Button(
-            toolbar,
-            text="Exit Fullscreen  (Esc)",
+            toolbar, text="Exit Fullscreen  (Esc)",
             command=self._exit_fullscreen,
         ).pack(side="left")
 
@@ -518,11 +580,20 @@ class WheelchairControlGUI:
             tags="bar",
         )
 
+    def _init_enc_bar(self, canvas: tk.Canvas) -> None:
+        w, h, half = BAR_W, BAR_H, BAR_HALF
+        canvas.create_rectangle(0,    0, half, h, fill=COLOR_BG_L, outline="")
+        canvas.create_rectangle(half, 0, w,    h, fill=COLOR_BG_R, outline="")
+        canvas.create_line(half, 0, half, h, fill="#455a64", width=2)
+        canvas.create_rectangle(
+            half, 3, half, h - 3,
+            fill=COLOR_STOP_FG, outline="",
+            tags="bar",
+        )
+
     # ── Motor control panel ───────────────────────────────────────────────────
 
     def _build_motor_control_panel(self, parent: ttk.LabelFrame) -> None:
-
-        # ── PWM limit ─────────────────────────────────────────────────────────
         self._var_pwm_limit     = tk.DoubleVar(value=PWM_LIMIT_DEFAULT)
         self._sv_pwm_limit_val  = tk.StringVar(value=f"{PWM_LIMIT_DEFAULT:.2f}")
         self._sv_pwm_limit_warn = tk.StringVar(value="")
@@ -576,7 +647,6 @@ class WheelchairControlGUI:
         ttk.Separator(parent, orient="horizontal").grid(
             row=3, column=0, columnspan=3, sticky="ew", pady=8)
 
-        # ── Motor sliders ─────────────────────────────────────────────────────
         self._var_left  = tk.DoubleVar(value=0.0)
         self._var_right = tk.DoubleVar(value=0.0)
         self._sv_left_cmd  = tk.StringVar(value="+0.00")
@@ -621,7 +691,6 @@ class WheelchairControlGUI:
         ttk.Separator(parent, orient="horizontal").grid(
             row=6, column=0, columnspan=3, sticky="ew", pady=8)
 
-        # ── Send Once ─────────────────────────────────────────────────────────
         self._btn_send_once = ttk.Button(
             parent, text="Send Once",
             command=self._on_send_once,
@@ -630,7 +699,6 @@ class WheelchairControlGUI:
         self._btn_send_once.grid(
             row=7, column=0, columnspan=3, sticky="ew", pady=(0, 4))
 
-        # ── Stream buttons ────────────────────────────────────────────────────
         stream_btn_frame = ttk.Frame(parent)
         stream_btn_frame.grid(
             row=8, column=0, columnspan=3, sticky="ew", pady=(0, 4))
@@ -651,7 +719,6 @@ class WheelchairControlGUI:
         )
         self._btn_stop_stream.grid(row=0, column=1, sticky="ew", padx=(2, 0))
 
-        # ── Stream status ─────────────────────────────────────────────────────
         stream_info = ttk.Frame(parent)
         stream_info.grid(
             row=9, column=0, columnspan=3, sticky="ew", pady=(0, 2))
@@ -670,7 +737,6 @@ class WheelchairControlGUI:
             foreground=COLOR_STOP_FG,
         ).pack(side="left")
 
-        # ── Last transmitted values ───────────────────────────────────────────
         tx_frame = ttk.Frame(parent)
         tx_frame.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
@@ -694,7 +760,6 @@ class WheelchairControlGUI:
         ttk.Separator(parent, orient="horizontal").grid(
             row=11, column=0, columnspan=3, sticky="ew", pady=6)
 
-        # ── STOP ─────────────────────────────────────────────────────────────
         self._btn_stop = tk.Button(
             parent,
             text="STOP",
@@ -711,7 +776,6 @@ class WheelchairControlGUI:
         self._btn_stop.grid(
             row=12, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
-        # ── Zero utilities ────────────────────────────────────────────────────
         util = ttk.Frame(parent)
         util.grid(row=13, column=0, columnspan=3, sticky="ew")
         for col, (label, cmd) in enumerate([
@@ -729,7 +793,6 @@ class WheelchairControlGUI:
         ttk.Separator(parent, orient="horizontal").grid(
             row=14, column=0, columnspan=3, sticky="ew", pady=8)
 
-        # ── Latest response ───────────────────────────────────────────────────
         resp = ttk.LabelFrame(parent, text="Latest Response", padding=4)
         resp.grid(row=15, column=0, columnspan=3, sticky="ew")
         self._sv_last_ack = tk.StringVar(value="—")
@@ -749,7 +812,7 @@ class WheelchairControlGUI:
                   foreground=COLOR_STOP_FG, font=("", 8)).grid(
             row=16, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-    # ── Smoothing settings panel ──────────────────────────────────────────────
+    # ── Joystick smoothing panel ──────────────────────────────────────────────
 
     def _build_smoothing_panel(self, parent: ttk.LabelFrame) -> None:
         parent.columnconfigure(1, weight=1)
@@ -833,17 +896,196 @@ class WheelchairControlGUI:
             command=self._on_reset_smoothing,
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+    # ── Encoder panel ─────────────────────────────────────────────────────────
+
+    def _build_encoder_panel(self, parent: ttk.LabelFrame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.columnconfigure(1, weight=1)
+
+        left_frame = ttk.LabelFrame(
+            parent, text="Left  (GPIO4 / GPIO5)", padding=4)
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        (self._enc_left_bar,
+         self._sv_enc_left_omega,
+         self._sv_enc_left_filt,
+         self._sv_enc_left_vis,
+         self._sv_enc_left_rpm,
+         self._sv_enc_left_count,
+         self._sv_enc_left_delta) = self._build_encoder_section(left_frame)
+
+        right_frame = ttk.LabelFrame(
+            parent, text="Right (GPIO6 / GPIO7)", padding=4)
+        right_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+
+        (self._enc_right_bar,
+         self._sv_enc_right_omega,
+         self._sv_enc_right_filt,
+         self._sv_enc_right_vis,
+         self._sv_enc_right_rpm,
+         self._sv_enc_right_count,
+         self._sv_enc_right_delta) = self._build_encoder_section(right_frame)
+
+        status_row = ttk.Frame(parent)
+        status_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Label(
+            status_row, text="enc_status:", foreground=COLOR_STOP_FG,
+        ).pack(side="left")
+        self._sv_enc_status = tk.StringVar(value="—")
+        self._lbl_enc_status = ttk.Label(
+            status_row,
+            textvariable=self._sv_enc_status,
+            font=("", 9, "bold"),
+        )
+        self._lbl_enc_status.pack(side="left", padx=(4, 0))
+
+    def _build_encoder_section(
+        self,
+        parent: ttk.LabelFrame,
+    ) -> Tuple[tk.Canvas, tk.StringVar, tk.StringVar,
+               tk.StringVar, tk.StringVar, tk.StringVar, tk.StringVar]:
+        bar_row = ttk.Frame(parent)
+        bar_row.pack(fill="x", pady=(2, 6))
+
+        ttk.Label(bar_row, text="CCW", foreground=COLOR_REV,
+                  width=4, anchor="e").pack(side="left", padx=(0, 2))
+        bar = tk.Canvas(
+            bar_row,
+            width=BAR_W, height=BAR_H,
+            highlightthickness=1,
+            highlightbackground="#b0bec5",
+        )
+        bar.pack(side="left")
+        self._init_enc_bar(bar)
+        ttk.Label(bar_row, text="CW", foreground=COLOR_FWD,
+                  width=3, anchor="w").pack(side="left", padx=(2, 0))
+
+        sv_omega = tk.StringVar(value="—")
+        sv_filt  = tk.StringVar(value="—")
+        sv_vis   = tk.StringVar(value="—")
+        sv_rpm   = tk.StringVar(value="—")
+        sv_count = tk.StringVar(value="—")
+        sv_delta = tk.StringVar(value="—")
+
+        num = ttk.Frame(parent)
+        num.pack(fill="x")
+
+        label_rows = [
+            ("ω:",      sv_omega, None),
+            ("ω filt:", sv_filt,  COLOR_STOP_FG),
+            ("ω vis:",  sv_vis,   COLOR_STOP_FG),
+            ("RPM:",    sv_rpm,   None),
+            ("count:",  sv_count, None),
+            ("Δ/cycle:", sv_delta, None),
+        ]
+        for i, (lbl, var, fg) in enumerate(label_rows):
+            lw = ttk.Label(num, text=lbl, width=8, anchor="e")
+            lw.grid(row=i, column=0, sticky="e", padx=(0, 4), pady=1)
+            vw = ttk.Label(
+                num, textvariable=var, width=16, anchor="w",
+                font=("Courier", 9))
+            vw.grid(row=i, column=1, sticky="w", pady=1)
+            if fg:
+                lw.configure(foreground=fg)
+                vw.configure(foreground=fg)
+
+        return bar, sv_omega, sv_filt, sv_vis, sv_rpm, sv_count, sv_delta
+
+    # ── Encoder smoothing panel ───────────────────────────────────────────────
+
+    def _build_encoder_smoothing_panel(self, parent: ttk.LabelFrame) -> None:
+        parent.columnconfigure(1, weight=1)
+
+        self._var_enc_filter    = tk.DoubleVar(value=self.enc_filter_alpha)
+        self._var_enc_interp    = tk.DoubleVar(value=self.enc_interp_alpha)
+        self._var_enc_max_omega = tk.DoubleVar(value=self.enc_max_omega)
+
+        self._sv_enc_filter    = tk.StringVar(value=f"{self.enc_filter_alpha:.2f}")
+        self._sv_enc_interp    = tk.StringVar(value=f"{self.enc_interp_alpha:.2f}")
+        self._sv_enc_max_omega = tk.StringVar(value=f"{self.enc_max_omega:.0f}")
+
+        def _on_enc_filter(*_: Any) -> None:
+            v = round(self._var_enc_filter.get(), 2)
+            self.enc_filter_alpha = max(SMOOTHING_ALPHA_MIN, min(SMOOTHING_ALPHA_MAX, v))
+            self._sv_enc_filter.set(f"{self.enc_filter_alpha:.2f}")
+
+        def _on_enc_interp(*_: Any) -> None:
+            v = round(self._var_enc_interp.get(), 2)
+            self.enc_interp_alpha = max(SMOOTHING_ALPHA_MIN, min(SMOOTHING_ALPHA_MAX, v))
+            self._sv_enc_interp.set(f"{self.enc_interp_alpha:.2f}")
+
+        def _on_enc_max_omega(*_: Any) -> None:
+            v = self._var_enc_max_omega.get()
+            self.enc_max_omega = max(1.0, min(500.0, round(v, 1)))
+            self._sv_enc_max_omega.set(f"{self.enc_max_omega:.0f}")
+
+        self._var_enc_filter.trace_add("write",    _on_enc_filter)
+        self._var_enc_interp.trace_add("write",    _on_enc_interp)
+        self._var_enc_max_omega.trace_add("write", _on_enc_max_omega)
+
+        rows = [
+            (
+                "Filter alpha:",
+                self._var_enc_filter,
+                SMOOTHING_ALPHA_MIN, SMOOTHING_ALPHA_MAX, 0.01,
+                self._sv_enc_filter,
+                "1.00 = no filtering    0.01 = very slow response",
+            ),
+            (
+                "Interp alpha:",
+                self._var_enc_interp,
+                SMOOTHING_ALPHA_MIN, SMOOTHING_ALPHA_MAX, 0.01,
+                self._sv_enc_interp,
+                "1.00 = jumps instantly    0.01 = very slow visual",
+            ),
+            (
+                "Max ω (rad/s):",
+                self._var_enc_max_omega,
+                1.0, 200.0, 1.0,
+                self._sv_enc_max_omega,
+                "rad/s at bar full-scale  (50 ≈ 478 RPM   100 ≈ 955 RPM)",
+            ),
+        ]
+
+        for row_idx, (label, var, from_, to_, res, sv, hint) in enumerate(rows):
+            ttk.Label(parent, text=label, width=16, anchor="e").grid(
+                row=row_idx, column=0, sticky="e", padx=(0, 4), pady=3)
+            tk.Scale(
+                parent,
+                variable=var,
+                from_=from_,
+                to=to_,
+                resolution=res,
+                orient="horizontal",
+                length=220,
+                showvalue=False,
+            ).grid(row=row_idx, column=1, sticky="ew", padx=(0, 4), pady=3)
+            ttk.Label(
+                parent, textvariable=sv,
+                width=6, anchor="w", font=("Courier", 9),
+            ).grid(row=row_idx, column=2, sticky="w", padx=(0, 12), pady=3)
+            ttk.Label(
+                parent, text=hint,
+                foreground=COLOR_STOP_FG, font=("", 8),
+            ).grid(row=row_idx, column=3, sticky="w", pady=3)
+
+        ttk.Button(
+            parent,
+            text="Reset encoder smoothing",
+            command=self._on_reset_enc_smoothing,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
     # ── Safety panel ──────────────────────────────────────────────────────────
 
     def _build_safety_panel(self, parent: ttk.Frame) -> None:
         safety = ttk.LabelFrame(parent, text="Safety", padding=6)
-        safety.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        safety.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
         warn = tk.Label(
             safety,
             text=(
                 "⚠  Do not use with wheels on the ground. "
-                "v0.6.2 is for suspended / no-load PWM testing only."
+                "v0.7.x is for suspended / no-load PWM testing only."
             ),
             foreground=COLOR_WARN,
             font=("", 9, "bold"),
@@ -937,24 +1179,47 @@ class WheelchairControlGUI:
         self.motor_left  = ml if ml is not None else 0.0
         self.motor_right = mr if mr is not None else 0.0
 
+        # Encoder fields
+        enc_status = pkt.get("enc_status")
+        if enc_status is not None:
+            self.enc_status = str(enc_status)
+            self.enc_ok = enc_status == "ok"
+
+        if self.enc_ok:
+            lc = pkt.get("enc_left_count")
+            rc = pkt.get("enc_right_count")
+            ld = pkt.get("enc_left_delta")
+            rd = pkt.get("enc_right_delta")
+
+            if lc is not None:
+                self.enc_left_count = int(lc)
+            if rc is not None:
+                self.enc_right_count = int(rc)
+            if ld is not None:
+                self.enc_left_delta = int(ld)
+                self.latest_omega_left = int(ld) * OMEGA_PER_COUNT
+            if rd is not None:
+                self.enc_right_delta = int(rd)
+                self.latest_omega_right = int(rd) * OMEGA_PER_COUNT
+
     # ── GUI frame ─────────────────────────────────────────────────────────────
 
     def _gui_frame(self) -> None:
         self._process_queue()
 
+        # Joystick pipeline
         self.filtered_x = exp_step(self.filtered_x, self.latest_x, self.filter_alpha)
         self.filtered_y = exp_step(self.filtered_y, self.latest_y, self.filter_alpha)
-
-        self.visual_x = exp_step(self.visual_x, self.filtered_x, self.interp_alpha)
-        self.visual_y = exp_step(self.visual_y, self.filtered_y, self.interp_alpha)
+        self.visual_x   = exp_step(self.visual_x,   self.filtered_x, self.interp_alpha)
+        self.visual_y   = exp_step(self.visual_y,   self.filtered_y, self.interp_alpha)
 
         self._move_dot(self.visual_x, self.visual_y)
-
         self._sv_filt_x.set(f"{self.filtered_x:+.3f}")
         self._sv_filt_y.set(f"{self.filtered_y:+.3f}")
         self._sv_vis_x.set(f"{self.visual_x:+.3f}")
         self._sv_vis_y.set(f"{self.visual_y:+.3f}")
 
+        # Motor monitor
         eff_left  = self.motor_left  if self.motor_active else 0.0
         eff_right = self.motor_right if self.motor_active else 0.0
         self._update_bar(self._left_bar,  eff_left)
@@ -972,6 +1237,18 @@ class WheelchairControlGUI:
         else:
             self._sv_active.set("false")
             self._lbl_active.configure(foreground=COLOR_STOP_FG)
+
+        # Encoder omega pipeline
+        self.filtered_omega_left  = exp_step(
+            self.filtered_omega_left,  self.latest_omega_left,  self.enc_filter_alpha)
+        self.filtered_omega_right = exp_step(
+            self.filtered_omega_right, self.latest_omega_right, self.enc_filter_alpha)
+        self.visual_omega_left    = exp_step(
+            self.visual_omega_left,    self.filtered_omega_left,  self.enc_interp_alpha)
+        self.visual_omega_right   = exp_step(
+            self.visual_omega_right,   self.filtered_omega_right, self.enc_interp_alpha)
+
+        self._update_encoder_display()
 
         if not self.closing:
             self.root.after(self.gui_update_ms, self._gui_frame)
@@ -1002,6 +1279,68 @@ class WheelchairControlGUI:
         canvas.itemconfigure("bar", fill=color)
         canvas.coords("bar", x0, 3, x1, h - 3)
 
+    def _update_encoder_display(self) -> None:
+        max_omega = self.enc_max_omega if self.enc_max_omega > 0 else 1.0
+
+        sides = [
+            (
+                self.latest_omega_left,
+                self.filtered_omega_left,
+                self.visual_omega_left,
+                self.enc_left_count,
+                self.enc_left_delta,
+                self._enc_left_bar,
+                self._sv_enc_left_omega,
+                self._sv_enc_left_filt,
+                self._sv_enc_left_vis,
+                self._sv_enc_left_rpm,
+                self._sv_enc_left_count,
+                self._sv_enc_left_delta,
+            ),
+            (
+                self.latest_omega_right,
+                self.filtered_omega_right,
+                self.visual_omega_right,
+                self.enc_right_count,
+                self.enc_right_delta,
+                self._enc_right_bar,
+                self._sv_enc_right_omega,
+                self._sv_enc_right_filt,
+                self._sv_enc_right_vis,
+                self._sv_enc_right_rpm,
+                self._sv_enc_right_count,
+                self._sv_enc_right_delta,
+            ),
+        ]
+
+        for (o_raw, o_filt, o_vis, count, delta,
+             bar, sv_omega, sv_filt, sv_vis,
+             sv_rpm, sv_count, sv_delta) in sides:
+
+            self._update_bar(bar, o_vis / max_omega)
+
+            if self.enc_ok:
+                sv_omega.set(f"{o_raw:+.3f} rad/s")
+                sv_filt.set(f"{o_filt:+.3f} rad/s")
+                sv_vis.set(f"{o_vis:+.3f} rad/s")
+                rpm = o_vis * 60.0 / TWO_PI
+                sv_rpm.set(f"{rpm:+.1f} RPM")
+                sv_count.set(str(count))
+                sv_delta.set(f"{delta:+d}")
+            else:
+                for sv in (sv_omega, sv_filt, sv_vis, sv_rpm, sv_count, sv_delta):
+                    sv.set("—")
+
+        if self.enc_ok:
+            self._sv_enc_status.set("ok")
+            self._lbl_enc_status.configure(foreground=COLOR_FWD)
+        elif self.enc_status == "error":
+            self._sv_enc_status.set("error")
+            self._lbl_enc_status.configure(foreground=COLOR_REV)
+        else:
+            self._sv_enc_status.set(self.enc_status)
+            self._lbl_enc_status.configure(foreground=COLOR_STOP_FG)
+
     # ── Age ticker ────────────────────────────────────────────────────────────
 
     def _tick_age(self) -> None:
@@ -1016,7 +1355,6 @@ class WheelchairControlGUI:
     # ── Serial write ──────────────────────────────────────────────────────────
 
     def _send_raw(self, line: str) -> bool:
-        """Write one JSON line to the serial port. Thread-safe via _write_lock."""
         with self._write_lock:
             if self._conn is None:
                 self._sv_conn.set("not connected — cannot send")
@@ -1041,7 +1379,6 @@ class WheelchairControlGUI:
     # ── Continuous stream ─────────────────────────────────────────────────────
 
     def _stream_tick(self) -> None:
-        """Send one pwm_test command and re-schedule the next tick."""
         if not self._streaming or self.closing:
             self._stream_after_id = None
             return
@@ -1099,7 +1436,6 @@ class WheelchairControlGUI:
         self._slider_left.configure(from_=-new_limit, to=new_limit)
         self._slider_right.configure(from_=-new_limit, to=new_limit)
 
-        # Clamp current slider values into the new range.
         for var in (self._var_left, self._var_right):
             v = var.get()
             var.set(max(-new_limit, min(new_limit, v)))
@@ -1163,6 +1499,11 @@ class WheelchairControlGUI:
         self._var_smooth_filter.set(FILTER_ALPHA)
         self._var_smooth_interp.set(INTERP_ALPHA)
         self._var_smooth_ms.set(GUI_UPDATE_MS)
+
+    def _on_reset_enc_smoothing(self) -> None:
+        self._var_enc_filter.set(ENC_FILTER_ALPHA)
+        self._var_enc_interp.set(ENC_INTERP_ALPHA)
+        self._var_enc_max_omega.set(ENC_MAX_OMEGA)
 
     # ── Close ─────────────────────────────────────────────────────────────────
 
