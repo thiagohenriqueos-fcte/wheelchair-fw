@@ -18,8 +18,8 @@
 #include "driver/uart_vfs.h"
 #define UART_PORT_NUM  UART_NUM_0
 #define UART_BAUD_RATE 115200
-#define UART_TX_PIN    GPIO_NUM_1
-#define UART_RX_PIN    GPIO_NUM_3
+#define UART_TX_PIN    1
+#define UART_RX_PIN    3
 #endif
 
 static SemaphoreHandle_t output_mutex;
