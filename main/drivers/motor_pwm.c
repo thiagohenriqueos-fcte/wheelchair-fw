@@ -5,10 +5,10 @@
 #include "driver/mcpwm_prelude.h"
 
 /* GPIO assignments for IBT-2 H-bridge inputs */
-#define LEFT_RPWM_GPIO   10
-#define LEFT_LPWM_GPIO   11
-#define RIGHT_RPWM_GPIO  12
-#define RIGHT_LPWM_GPIO  13
+#define LEFT_RPWM_GPIO   13
+#define LEFT_LPWM_GPIO   12
+#define RIGHT_RPWM_GPIO  14
+#define RIGHT_LPWM_GPIO  27
 
 /*
  * 20 MHz resolution -> period_ticks = 20 000 000 / 25 000 = 800.

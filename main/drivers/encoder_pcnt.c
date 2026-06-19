@@ -6,10 +6,10 @@
 #include "esp_log.h"
 
 /* GPIO assignments — differential line receivers connect before these pins. */
-#define LEFT_ENC_A_GPIO   4
-#define LEFT_ENC_B_GPIO   5
-#define RIGHT_ENC_A_GPIO  6
-#define RIGHT_ENC_B_GPIO  7
+#define LEFT_ENC_A_GPIO   5
+#define LEFT_ENC_B_GPIO   18
+#define RIGHT_ENC_A_GPIO  19
+#define RIGHT_ENC_B_GPIO  21
 
 /*
  * Hardware counter limits.  Kept well below ±32767 so a single polling
