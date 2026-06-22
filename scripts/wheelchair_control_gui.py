@@ -63,7 +63,7 @@ PWM_STREAM_PERIOD_MS = 1000 // PWM_STREAM_HZ
 
 # ── Encoder constants ─────────────────────────────────────────────────────────
 
-ENCODER_PPR            = 2000
+ENCODER_PPR            = 600
 ENCODER_COUNTS_PER_REV = ENCODER_PPR * 4
 ENCODER_DT             = 0.050
 
@@ -73,6 +73,17 @@ OMEGA_PER_COUNT = TWO_PI / (ENCODER_COUNTS_PER_REV * ENCODER_DT)
 ENC_FILTER_ALPHA = 0.30
 ENC_INTERP_ALPHA = 0.20
 ENC_MAX_OMEGA    = 50.0
+
+
+# ── Wheel visualiser ─────────────────────────────────────────────────────────
+
+WHL_SIZE    = 140
+WHL_CX      = WHL_SIZE // 2
+WHL_CY      = WHL_SIZE // 2
+WHL_TIRE_R  = 58
+WHL_RIM_R   = 48
+WHL_HUB_R   = 11
+WHL_SPOKE_R = 44
 
 
 # ── Colours (dark-theme canvas palette) ───────────────────────────────────────
@@ -91,6 +102,11 @@ C_REV       = "#f38ba8"    # reverse fill — soft red/pink
 C_NEUTRAL   = "#585b70"    # stopped bar fill
 C_LIMIT     = "#fab387"    # 0.30 limit tick — peach
 C_MUTED     = "#6c7086"    # secondary / muted text
+
+C_WHEEL_TIRE  = "#313244"
+C_WHEEL_RIM   = "#45475a"
+C_WHEEL_HUB   = "#89b4fa"
+C_WHEEL_SPOKE = "#cdd6f4"
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -257,6 +273,10 @@ class WheelchairControlGUI:
         self.enc_left_delta  = self.enc_right_delta = 0
         self.enc_status = "—"
         self.enc_ok     = False
+
+        self._wheel_last_update   = time.monotonic()
+        self._wheel_omega_left    = 0.0
+        self._wheel_omega_right   = 0.0
 
         self.enc_filter_alpha = ENC_FILTER_ALPHA
         self.enc_interp_alpha = ENC_INTERP_ALPHA
@@ -883,6 +903,50 @@ class WheelchairControlGUI:
             font=("", 9, "bold"), bootstyle="secondary")
         self._lbl_enc_status.pack(side=LEFT, padx=(6, 0))
 
+        self._build_wheel_visual(parent)
+
+    # ── Wheel visualiser ─────────────────────────────────────────────────────
+
+    def _build_wheel_visual(self, parent: ttk.Frame) -> None:
+        wheel_row = ttk.Frame(parent)
+        wheel_row.grid(row=2, column=0, columnspan=2, pady=(12, 4))
+
+        for col, label in enumerate(("Left", "Right")):
+            frame = ttk.Frame(wheel_row)
+            frame.grid(row=0, column=col, padx=24)
+            ttk.Label(frame, text=label, foreground=C_MUTED,
+                      font=("", 8)).pack(pady=(0, 4))
+            c = tk.Canvas(frame, width=WHL_SIZE, height=WHL_SIZE,
+                          background=C_CANVAS_BG, highlightthickness=1,
+                          highlightbackground=C_CIRCLE)
+            c.pack()
+            cx, cy = WHL_CX, WHL_CY
+            c.create_oval(cx - WHL_TIRE_R, cy - WHL_TIRE_R,
+                          cx + WHL_TIRE_R, cy + WHL_TIRE_R,
+                          fill=C_WHEEL_TIRE, outline=C_WHEEL_RIM, width=3)
+            c.create_oval(cx - WHL_RIM_R, cy - WHL_RIM_R,
+                          cx + WHL_RIM_R, cy + WHL_RIM_R,
+                          fill="", outline=C_WHEEL_RIM, width=1)
+            c.create_line(cx, cy, cx + WHL_SPOKE_R, cy,
+                          fill=C_WHEEL_SPOKE, width=3,
+                          capstyle="round", tags="spoke")
+            c.create_oval(cx - WHL_HUB_R, cy - WHL_HUB_R,
+                          cx + WHL_HUB_R, cy + WHL_HUB_R,
+                          fill=C_WHEEL_HUB, outline=C_CANVAS_BG, width=2)
+            if col == 0:
+                self._wheel_canvas_left  = c
+            else:
+                self._wheel_canvas_right = c
+
+    def _draw_wheel(self, canvas: tk.Canvas, angle: float) -> None:
+        cx, cy = WHL_CX, WHL_CY
+        canvas.coords(
+            "spoke",
+            cx, cy,
+            cx + math.cos(angle) * WHL_SPOKE_R,
+            cy - math.sin(angle) * WHL_SPOKE_R,
+        )
+
     # ── Encoder smoothing ─────────────────────────────────────────────────────
 
     def _build_encoder_smoothing_panel(self, parent: ttk.Labelframe) -> None:
@@ -1069,11 +1133,15 @@ class WheelchairControlGUI:
             if rc is not None:
                 self.enc_right_count = int(rc)
             if ld is not None:
-                self.enc_left_delta      = int(ld)
-                self.latest_omega_left   = int(ld) * OMEGA_PER_COUNT
+                self.enc_left_delta    = int(ld)
+                self.latest_omega_left = int(ld) * OMEGA_PER_COUNT
+                self._wheel_omega_left = self.latest_omega_left
             if rd is not None:
-                self.enc_right_delta     = int(rd)
-                self.latest_omega_right  = int(rd) * OMEGA_PER_COUNT
+                self.enc_right_delta    = int(rd)
+                self.latest_omega_right = int(rd) * OMEGA_PER_COUNT
+                self._wheel_omega_right = self.latest_omega_right
+            if ld is not None or rd is not None:
+                self._wheel_last_update = time.monotonic()
 
     # ── GUI frame ─────────────────────────────────────────────────────────────
 
@@ -1119,6 +1187,17 @@ class WheelchairControlGUI:
         self.visual_omega_right   = exp_step(
             self.visual_omega_right,   self.filtered_omega_right, self.enc_interp_alpha)
         self._update_encoder_display()
+
+        MAX_PREDICTION_S = 0.25
+        age = min(time.monotonic() - self._wheel_last_update, MAX_PREDICTION_S)
+        counts_per_s_left  = self._wheel_omega_left  / TWO_PI * ENCODER_COUNTS_PER_REV
+        counts_per_s_right = self._wheel_omega_right / TWO_PI * ENCODER_COUNTS_PER_REV
+        est_left  = self.enc_left_count  + counts_per_s_left  * age
+        est_right = self.enc_right_count + counts_per_s_right * age
+        angle_left  = (int(round(est_left))  % ENCODER_COUNTS_PER_REV) / ENCODER_COUNTS_PER_REV * TWO_PI
+        angle_right = (int(round(est_right)) % ENCODER_COUNTS_PER_REV) / ENCODER_COUNTS_PER_REV * TWO_PI
+        self._draw_wheel(self._wheel_canvas_left,  angle_left)
+        self._draw_wheel(self._wheel_canvas_right, angle_right)
 
         if not self.closing:
             self.root.after(self.gui_update_ms, self._gui_frame)
