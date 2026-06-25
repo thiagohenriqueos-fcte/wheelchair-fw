@@ -609,11 +609,11 @@ class WheelchairControlGUI:
         self._lbl_drive_state.pack(side=LEFT, padx=(8, 0))
 
         self._left_bar,  self._sv_left_lbl  = self._build_motor_section(
-            parent, "Esquerda   GPIO10 / GPIO11")
+            parent, "Esquerda   GPIO12 / GPIO13")
         ttk.Separator(parent, orient=HORIZONTAL, bootstyle="secondary").pack(
             fill=X, pady=8)
         self._right_bar, self._sv_right_lbl = self._build_motor_section(
-            parent, "Direita    GPIO12 / GPIO13")
+            parent, "Direita    GPIO14 / GPIO27")
 
     def _build_motor_section(
         self, parent: tk.Widget, title: str,
