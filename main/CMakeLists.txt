@@ -8,7 +8,6 @@ endif()
 idf_component_register(
     SRCS
         "app_main.c"
-        "drivers/encoder_pcnt.c"
         "drivers/joystick_adc.c"
         "drivers/motor_pwm.c"
         "protocol/json_command.c"
@@ -23,7 +22,6 @@ idf_component_register(
     REQUIRES
         esp_adc
         esp_driver_mcpwm
-        esp_driver_pcnt
         ${SERIAL_DRIVER_COMPONENT}
         esp_timer
 )
