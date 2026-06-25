@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Wheelchair integrated control GUI — v0.7.1
+"""Wheelchair integrated control GUI — v0.8.0
 
-Usage:
-    python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
+Usage (source the ROS2 env first for LIDAR, e.g. /opt/ros/jazzy/setup.bash):
+    .venv/bin/python scripts/wheelchair_control_gui.py /dev/ttyACM0 --lidar /dev/ttyUSB0
+    .venv/bin/python scripts/wheelchair_control_gui.py --lidar /dev/ttyUSB0   # LIDAR only
+
+The optional RPLIDAR C1 is handled by the official sllidar_ros2 driver: the GUI
+starts that driver and subscribes to its sensor_msgs/LaserScan on /scan, on its
+own thread — never sharing the ESP32 telemetry link. The ESP32 port is optional.
 
 WARNING: for suspended / no-load PWM testing ONLY.
 """
@@ -10,12 +15,16 @@ WARNING: for suspended / no-load PWM testing ONLY.
 import argparse
 import json
 import math
+import os
 import queue
+import shutil
+import signal
+import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import ttkbootstrap as ttk  # drop-in replacement for tkinter.ttk
 from ttkbootstrap.constants import *
@@ -93,6 +102,46 @@ C_LIMIT     = "#fab387"    # 0.30 limit tick — peach
 C_MUTED     = "#6c7086"    # secondary / muted text
 
 
+# ── LIDAR (RPLIDAR C1 via ROS2) ───────────────────────────────────────────────
+#
+# The C1 is driven by the official sllidar_ros2 node (it owns the motor + C1
+# protocol — the legacy Python `rplidar` lib can't drive the C1). The GUI starts
+# that driver and subscribes to its sensor_msgs/LaserScan on /scan, on its own
+# thread — fully independent of the ESP32 telemetry link.
+#
+# Requires a sourced ROS2 environment (e.g. `source /opt/ros/jazzy/setup.bash`
+# and the sllidar workspace) before launching the GUI.
+
+LIDAR_DEFAULT_PORT  = "/dev/ttyUSB0"   # serial_port handed to the driver launch
+LIDAR_DEFAULT_TOPIC = "/scan"
+LIDAR_LAUNCH_PKG    = "sllidar_ros2"
+LIDAR_LAUNCH_FILE   = "sllidar_c1_launch.py"
+
+LIDAR_CANVAS    = 360          # square polar-plot canvas (px)
+LIDAR_MARGIN    = 12
+LIDAR_POINT_R   = 1.6          # plotted point radius (px)
+LIDAR_POOL_SIZE = 1500         # reused canvas point items (≥ points per scan)
+
+LIDAR_MIN_RANGE_DEFAULT = 0.15   # m — discard returns closer than this
+LIDAR_MAX_RANGE_DEFAULT = 6.0    # m — display scale + far gate
+LIDAR_QUALITY_DEFAULT   = 10     # discard returns below this quality (intensity)
+LIDAR_ANGLE_OFFSET_DEF  = 0.0    # deg — align sensor 0° to chassis front
+LIDAR_FLIP_DEFAULT      = True   # ROS LaserScan is CCW; screen plot is CW
+
+LIDAR_RANGE_MIN_LIMIT = 0.05     # C1 hardware minimum
+LIDAR_RANGE_MAX_LIMIT = 12.0     # C1 hardware maximum
+LIDAR_QUALITY_LIMIT   = 63
+
+LIDAR_RINGS = (0.25, 0.5, 0.75, 1.0)   # grid rings as fraction of max range
+
+LIDAR_DANGER_M = 0.5    # sector distance ≤ this → red
+LIDAR_WARN_M   = 1.0    # sector distance ≤ this → orange
+
+C_LIDAR_POINT   = "#89b4fa"
+C_LIDAR_NEAREST = "#f38ba8"
+C_LIDAR_FRONT   = "#a6e3a1"
+
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 def _alpha(value: str) -> float:
@@ -112,11 +161,17 @@ def _pos_int(value: str) -> int:
 def parse_arguments() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Wheelchair control GUI — suspended/no-load testing only.")
-    p.add_argument("port", help="Serial port, e.g. /dev/ttyACM0")
+    p.add_argument("port", nargs="?", default=None,
+                   help="ESP32 serial port, e.g. /dev/ttyACM0 "
+                        "(optional — omit to run LIDAR-only)")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--filter-alpha",  type=_alpha,   default=FILTER_ALPHA)
     p.add_argument("--interp-alpha",  type=_alpha,   default=INTERP_ALPHA)
     p.add_argument("--gui-update-ms", type=_pos_int, default=GUI_UPDATE_MS)
+    p.add_argument("--lidar", default=None,
+                   help=f"RPLIDAR C1 serial port for the driver, e.g. {LIDAR_DEFAULT_PORT}")
+    p.add_argument("--lidar-topic", default=LIDAR_DEFAULT_TOPIC,
+                   help=f"LaserScan topic to subscribe (default {LIDAR_DEFAULT_TOPIC})")
     return p.parse_args()
 
 
@@ -204,6 +259,130 @@ def serial_reader(
         event_queue.put(("stopped", None))
 
 
+# ── LIDAR reader thread (ROS2 /scan subscriber) ───────────────────────────────
+
+def laserscan_to_points(msg: Any) -> List[Tuple[float, float, float]]:
+    """Convert a sensor_msgs/LaserScan into [(quality, angle_deg, distance_mm)].
+
+    LaserScan angles are radians CCW from the sensor's +x; distances are metres
+    with inf/nan for no-return. sllidar publishes the per-beam quality in
+    `intensities`; when absent/zero we treat the beam as high quality so it is
+    not dropped by the host-side quality gate.
+    """
+    inc   = msg.angle_increment
+    a0    = msg.angle_min
+    inten = msg.intensities
+    n_int = len(inten)
+    pts: List[Tuple[float, float, float]] = []
+    for i, r in enumerate(msg.ranges):
+        if not math.isfinite(r) or r <= 0.0:
+            continue
+        q = inten[i] if i < n_int else 0.0
+        quality = q if q and q > 0 else 255.0
+        ang_deg = math.degrees(a0 + i * inc) % 360.0
+        pts.append((float(quality), ang_deg, r * 1000.0))
+    return pts
+
+
+def lidar_ros_reader(
+    topic: str,
+    serial_port: str,
+    event_queue: "queue.Queue[Tuple[str, Any]]",
+    stop_event: threading.Event,
+) -> None:
+    """Start the sllidar_ros2 driver and subscribe to its LaserScan topic.
+
+    Lives for the thread's lifetime: launches the driver as a child process
+    group, subscribes to `topic`, pushes ("lidar_scan", points) per message, and
+    on exit shuts the subscriber down and stops the driver (and thus the motor).
+    """
+    try:
+        import rclpy
+        from rclpy.qos import qos_profile_sensor_data
+        from sensor_msgs.msg import LaserScan
+    except Exception as exc:  # noqa: BLE001 — surface any ROS import failure
+        event_queue.put((
+            "lidar_error",
+            f"ROS2 indisponível ({exc}) — fonte o setup do ROS2 antes de abrir a GUI"))
+        event_queue.put(("lidar_stopped", None))
+        return
+
+    if shutil.which("ros2") is None:
+        event_queue.put(("lidar_error", "comando 'ros2' não encontrado — fonte o ROS2"))
+        event_queue.put(("lidar_stopped", None))
+        return
+
+    proc: Optional[subprocess.Popen] = None
+    node = None
+    try:
+        if not rclpy.ok():
+            rclpy.init()
+        node = rclpy.create_node("wheelchair_lidar_gui")
+        node.create_subscription(
+            LaserScan, topic,
+            lambda m: event_queue.put(("lidar_scan", laserscan_to_points(m))),
+            qos_profile_sensor_data)
+
+        # Reuse an already-running driver if one is publishing; only launch our
+        # own otherwise (avoids a second node fighting for the serial port).
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 2.0 and node.count_publishers(topic) == 0:
+            rclpy.spin_once(node, timeout_sec=0.1)
+
+        if node.count_publishers(topic) == 0:
+            proc = subprocess.Popen(
+                ["ros2", "launch", LIDAR_LAUNCH_PKG, LIDAR_LAUNCH_FILE,
+                 f"serial_port:={serial_port}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,   # own process group → clean group shutdown
+            )
+            event_queue.put(("lidar_status", f"driver iniciado ({serial_port})"))
+        else:
+            event_queue.put(("lidar_status", "usando driver já em execução"))
+        event_queue.put(("lidar_status", f"assinando {topic}…"))
+
+        while not stop_event.is_set():
+            if proc is not None and proc.poll() is not None:   # our driver died
+                event_queue.put(("lidar_error", "driver sllidar terminou (porta ocupada?)"))
+                break
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except Exception as exc:  # noqa: BLE001
+        event_queue.put(("lidar_error", str(exc)))
+    finally:
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
+        if proc is not None:
+            _stop_process_group(proc)
+        event_queue.put(("lidar_stopped", None))
+
+
+def _stop_process_group(proc: subprocess.Popen) -> None:
+    """SIGINT the driver's process group (graceful), escalate to SIGKILL."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(pgid, sig)
+            proc.wait(timeout=6)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:
+            return
+
+
 # ── Main GUI class ────────────────────────────────────────────────────────────
 
 class WheelchairControlGUI:
@@ -217,11 +396,15 @@ class WheelchairControlGUI:
         filter_alpha: float,
         interp_alpha: float,
         gui_update_ms: int,
+        esp_port: Optional[str] = None,
+        lidar_port: Optional[str] = None,
+        lidar_topic: str = LIDAR_DEFAULT_TOPIC,
     ) -> None:
         self.root          = root
         self.event_queue   = event_queue
         self.stop_event    = stop_event
         self.reader_thread = reader_thread
+        self.esp_port      = esp_port
         self.closing       = False
 
         self.filter_alpha  = filter_alpha
@@ -262,14 +445,40 @@ class WheelchairControlGUI:
         self.enc_interp_alpha = ENC_INTERP_ALPHA
         self.enc_max_omega    = ENC_MAX_OMEGA
 
+        # LIDAR pipeline (ROS2 /scan subscriber + sllidar driver — own thread,
+        # independent of the ESP32 link)
+        self._lidar_thread: Optional[threading.Thread] = None
+        self._lidar_stop:   Optional[threading.Event]  = None
+        self._lidar_running = False
+        self._lidar_scan: Optional[list] = None
+        self._lidar_dirty = False
+        self._lidar_shown = 0           # points displayed last frame
+        self.lidar_scans  = 0
+        self._lidar_hz    = 0.0
+        self._lidar_hz_t0: Optional[float] = None
+        self._lidar_hz_n0 = 0
+        self._lidar_start_t: Optional[float] = None   # when "Iniciar" was pressed
+        self._lidar_nodata_warned = False
+
+        # LIDAR calibration / filtering (applied host-side, live)
+        self._lidar_angle_offset = LIDAR_ANGLE_OFFSET_DEF
+        self._lidar_flip         = LIDAR_FLIP_DEFAULT
+        self._lidar_min_range    = LIDAR_MIN_RANGE_DEFAULT
+        self._lidar_max_range    = LIDAR_MAX_RANGE_DEFAULT
+        self._lidar_quality_min  = LIDAR_QUALITY_DEFAULT
+        self._lidar_init_port    = lidar_port or LIDAR_DEFAULT_PORT
+        self._lidar_init_topic   = lidar_topic or LIDAR_DEFAULT_TOPIC
+
         self._build_ui()
+        if self.esp_port is None:
+            self._sv_conn.set("sem ESP — modo LIDAR")
         self.root.after(self.gui_update_ms, self._gui_frame)
         self.root.after(AGE_UPDATE_MS,      self._tick_age)
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.root.title("Wheelchair Control  v0.7.1")
+        self.root.title("Wheelchair Control  v0.8.0")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
@@ -340,7 +549,13 @@ class WheelchairControlGUI:
             row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self._build_encoder_smoothing_panel(enc_smooth_frame)
 
-        self._build_safety_panel(outer)  # row 6
+        lidar_frame = ttk.Labelframe(
+            outer, text="LIDAR  (RPLIDAR C1)", padding=10, bootstyle="secondary")
+        lidar_frame.grid(
+            row=6, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self._build_lidar_panel(lidar_frame)
+
+        self._build_safety_panel(outer)  # row 7
 
         self.root.bind("<F11>",    lambda _e: self._toggle_fullscreen())
         self.root.bind("<Escape>", lambda _e: self._exit_fullscreen())
@@ -931,6 +1146,210 @@ class WheelchairControlGUI:
                    padding=(8, 3)).grid(
             row=3, column=0, columnspan=2, sticky=W, pady=(8, 0))
 
+    # ── LIDAR panel ───────────────────────────────────────────────────────────
+
+    def _build_lidar_panel(self, parent: ttk.Labelframe) -> None:
+        parent.columnconfigure(1, weight=1)
+
+        # Polar plot (left)
+        self._lidar_canvas = tk.Canvas(
+            parent, width=LIDAR_CANVAS, height=LIDAR_CANVAS,
+            background=C_CANVAS_BG, highlightthickness=1,
+            highlightbackground=C_CIRCLE)
+        self._lidar_canvas.grid(row=0, column=0, sticky="n", padx=(0, 12))
+        self._init_lidar_canvas()
+
+        # Metrics + controls (right)
+        side = ttk.Frame(parent)
+        side.grid(row=0, column=1, sticky="nsew")
+        side.columnconfigure(0, weight=1)
+
+        self._build_lidar_metrics(side)
+        self._build_lidar_controls(side)
+
+    def _init_lidar_canvas(self) -> None:
+        c      = self._lidar_canvas
+        cx     = cy = LIDAR_CANVAS / 2
+        draw_r = LIDAR_CANVAS / 2 - LIDAR_MARGIN
+
+        # Range rings + their metre labels (updated when max range changes)
+        self._lidar_ring_labels = []
+        for frac in LIDAR_RINGS:
+            rr = draw_r * frac
+            c.create_oval(cx - rr, cy - rr, cx + rr, cy + rr,
+                          outline=C_CANVAS_GRID, width=1)
+            lbl = c.create_text(cx + 3, cy - rr, anchor="sw",
+                                fill=C_MUTED, font=("", 7), text="")
+            self._lidar_ring_labels.append((frac, lbl))
+
+        # Cross axes
+        c.create_line(cx - draw_r, cy, cx + draw_r, cy, fill=C_CANVAS_GRID)
+        c.create_line(cx, cy - draw_r, cx, cy + draw_r, fill=C_CANVAS_GRID)
+
+        # Forward (chassis front) arrow — points up
+        c.create_line(cx, cy, cx, cy - draw_r,
+                      fill=C_LIDAR_FRONT, width=1, arrow="last")
+        c.create_text(cx + 10, cy - draw_r + 8, anchor="w",
+                      fill=C_LIDAR_FRONT, font=("", 7), text="frente")
+
+        # Reusable point pool (hidden until used)
+        self._lidar_point_items = [
+            c.create_oval(-4, -4, -3, -3, fill=C_LIDAR_POINT,
+                          outline="", state="hidden")
+            for _ in range(LIDAR_POOL_SIZE)
+        ]
+        self._lidar_nearest_item = c.create_oval(
+            -4, -4, -3, -3, fill=C_LIDAR_NEAREST, outline="white",
+            width=1, state="hidden")
+
+        # Chair marker (centre) on top
+        c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
+                      fill=C_LIDAR_FRONT, outline="")
+
+        self._update_lidar_ring_labels()
+
+    def _update_lidar_ring_labels(self) -> None:
+        for frac, lbl in self._lidar_ring_labels:
+            self._lidar_canvas.itemconfigure(
+                lbl, text=f"{frac * self._lidar_max_range:.1f} m")
+
+    def _build_lidar_metrics(self, parent: ttk.Frame) -> None:
+        mf = ttk.Labelframe(parent, text="Leitura", padding=8,
+                            bootstyle="secondary")
+        mf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        mf.columnconfigure(1, weight=1)
+        mf.columnconfigure(3, weight=1)
+
+        # Nearest obstacle
+        ttk.Label(mf, text="Mais próximo", foreground=C_MUTED,
+                  font=("", 8)).grid(row=0, column=0, columnspan=4, sticky=W)
+        self._sv_lidar_nearest = tk.StringVar(value="—")
+        ttk.Label(mf, textvariable=self._sv_lidar_nearest,
+                  font=("Courier", 13, "bold"), bootstyle="info").grid(
+            row=1, column=0, columnspan=4, sticky=W, pady=(0, 6))
+
+        # Sector minimums (front / back / left / right)
+        self._sv_lidar_sector: Dict[str, tk.StringVar] = {}
+        self._lbl_lidar_sector: Dict[str, ttk.Label] = {}
+        sectors = [("F", "Frente", 2, 0), ("B", "Trás", 2, 2),
+                   ("L", "Esq.", 3, 0), ("R", "Dir.", 3, 2)]
+        for key, label, r, col in sectors:
+            ttk.Label(mf, text=label, foreground=C_MUTED, font=("", 8)).grid(
+                row=r, column=col, sticky=E, padx=(0, 4), pady=1)
+            sv = tk.StringVar(value="—")
+            lbl = ttk.Label(mf, textvariable=sv, width=8, anchor=W,
+                            font=("Courier", 10, "bold"), bootstyle="secondary")
+            lbl.grid(row=r, column=col + 1, sticky=W, pady=1)
+            self._sv_lidar_sector[key]  = sv
+            self._lbl_lidar_sector[key] = lbl
+
+        # Scan health
+        health = ttk.Frame(mf)
+        health.grid(row=4, column=0, columnspan=4, sticky=W, pady=(6, 0))
+        self._sv_lidar_hz  = tk.StringVar(value="— Hz")
+        self._sv_lidar_pts = tk.StringVar(value="0 pts")
+        self._sv_lidar_q   = tk.StringVar(value="q —")
+        for sv in (self._sv_lidar_hz, self._sv_lidar_pts, self._sv_lidar_q):
+            ttk.Label(health, textvariable=sv, foreground=C_MUTED,
+                      font=("Courier", 8)).pack(side=LEFT, padx=(0, 12))
+
+    def _build_lidar_controls(self, parent: ttk.Frame) -> None:
+        cf = ttk.Labelframe(parent, text="Calibração", padding=8,
+                            bootstyle="secondary")
+        cf.grid(row=1, column=0, sticky="ew")
+        cf.columnconfigure(1, weight=1)
+
+        self._var_lidar_offset  = tk.DoubleVar(value=self._lidar_angle_offset)
+        self._var_lidar_quality = tk.DoubleVar(value=self._lidar_quality_min)
+        self._var_lidar_min     = tk.DoubleVar(value=self._lidar_min_range)
+        self._var_lidar_max     = tk.DoubleVar(value=self._lidar_max_range)
+        self._sv_lidar_offset   = tk.StringVar(value=f"{self._lidar_angle_offset:.0f}")
+        self._sv_lidar_quality  = tk.StringVar(value=f"{self._lidar_quality_min:.0f}")
+        self._sv_lidar_min      = tk.StringVar(value=f"{self._lidar_min_range:.2f}")
+        self._sv_lidar_max      = tk.StringVar(value=f"{self._lidar_max_range:.1f}")
+
+        def _on_offset(*_: Any) -> None:
+            self._lidar_angle_offset = round(self._var_lidar_offset.get(), 0) % 360.0
+            self._sv_lidar_offset.set(f"{self._lidar_angle_offset:.0f}")
+
+        def _on_quality(*_: Any) -> None:
+            self._lidar_quality_min = int(round(self._var_lidar_quality.get()))
+            self._sv_lidar_quality.set(f"{self._lidar_quality_min:d}")
+
+        def _on_min(*_: Any) -> None:
+            v = round(self._var_lidar_min.get(), 2)
+            self._lidar_min_range = max(LIDAR_RANGE_MIN_LIMIT, v)
+            self._sv_lidar_min.set(f"{self._lidar_min_range:.2f}")
+
+        def _on_max(*_: Any) -> None:
+            v = round(self._var_lidar_max.get(), 1)
+            self._lidar_max_range = min(LIDAR_RANGE_MAX_LIMIT, max(1.0, v))
+            self._sv_lidar_max.set(f"{self._lidar_max_range:.1f}")
+            self._update_lidar_ring_labels()
+
+        self._var_lidar_offset.trace_add("write",  _on_offset)
+        self._var_lidar_quality.trace_add("write", _on_quality)
+        self._var_lidar_min.trace_add("write",     _on_min)
+        self._var_lidar_max.trace_add("write",     _on_max)
+
+        rows = [
+            ("Offset 0° (°)", self._var_lidar_offset, 0.0, 359.0, 1.0,
+             self._sv_lidar_offset, "alinha frente do chassi"),
+            ("Qualidade ≥",   self._var_lidar_quality, 0.0, float(LIDAR_QUALITY_LIMIT), 1.0,
+             self._sv_lidar_quality, "descarta retornos fracos"),
+            ("Range mín (m)", self._var_lidar_min, LIDAR_RANGE_MIN_LIMIT, 2.0, 0.05,
+             self._sv_lidar_min, "ignora ecos muito perto"),
+            ("Range máx (m)", self._var_lidar_max, 1.0, LIDAR_RANGE_MAX_LIMIT, 0.5,
+             self._sv_lidar_max, "escala do plot + corte longe"),
+        ]
+        self._build_slider_rows(cf, rows, 0)
+
+        # Flip direction
+        self._var_lidar_flip = tk.BooleanVar(value=self._lidar_flip)
+
+        def _on_flip() -> None:
+            self._lidar_flip = self._var_lidar_flip.get()
+
+        ttk.Checkbutton(
+            cf, text="Inverter sentido (CW/CCW)", variable=self._var_lidar_flip,
+            command=_on_flip, bootstyle="secondary-round-toggle").grid(
+            row=4, column=0, columnspan=4, sticky=W, pady=(6, 4))
+
+        ttk.Separator(cf, orient=HORIZONTAL, bootstyle="secondary").grid(
+            row=5, column=0, columnspan=4, sticky=EW, pady=6)
+
+        # Driver launch (sllidar_ros2) + /scan subscription
+        conn = ttk.Frame(cf)
+        conn.grid(row=6, column=0, columnspan=4, sticky=EW)
+        ttk.Label(conn, text="Porta", foreground=C_MUTED, font=("", 8)).pack(
+            side=LEFT, padx=(0, 4))
+        self._var_lidar_port = tk.StringVar(value=self._lidar_init_port)
+        ttk.Entry(conn, textvariable=self._var_lidar_port, width=13,
+                  font=("Courier", 9)).pack(side=LEFT, padx=(0, 8))
+        ttk.Label(conn, text="Tópico", foreground=C_MUTED, font=("", 8)).pack(
+            side=LEFT, padx=(0, 4))
+        self._var_lidar_topic = tk.StringVar(value=self._lidar_init_topic)
+        ttk.Entry(conn, textvariable=self._var_lidar_topic, width=8,
+                  font=("Courier", 9)).pack(side=LEFT, padx=(0, 8))
+        self._btn_lidar_start = ttk.Button(
+            conn, text="Iniciar", bootstyle="success",
+            command=self._on_lidar_start, padding=(8, 3))
+        self._btn_lidar_start.pack(side=LEFT, padx=(0, 4))
+        self._btn_lidar_stop = ttk.Button(
+            conn, text="Parar", bootstyle="secondary",
+            command=self._on_lidar_stop, state=DISABLED, padding=(8, 3))
+        self._btn_lidar_stop.pack(side=LEFT)
+
+        status_row = ttk.Frame(cf)
+        status_row.grid(row=7, column=0, columnspan=4, sticky=W, pady=(6, 0))
+        ttk.Label(status_row, text="status:", foreground=C_MUTED,
+                  font=("", 8)).pack(side=LEFT, padx=(0, 6))
+        self._sv_lidar_status = tk.StringVar(value="parado")
+        self._lbl_lidar_status = ttk.Label(
+            status_row, textvariable=self._sv_lidar_status,
+            font=("", 9, "bold"), bootstyle="secondary")
+        self._lbl_lidar_status.pack(side=LEFT)
+
     # ── Shared slider row builder ─────────────────────────────────────────────
 
     def _build_slider_rows(
@@ -960,7 +1379,7 @@ class WheelchairControlGUI:
     def _build_safety_panel(self, parent: ttk.Frame) -> None:
         safety = ttk.Labelframe(
             parent, text="Safety", padding=10, bootstyle="warning")
-        safety.grid(row=6, column=0, columnspan=3, sticky=EW, pady=(4, 0))
+        safety.grid(row=7, column=0, columnspan=3, sticky=EW, pady=(4, 0))
 
         ttk.Label(
             safety,
@@ -1003,6 +1422,25 @@ class WheelchairControlGUI:
             elif kind == "stopped" and not self.closing:
                 if not self._sv_conn.get().startswith("error:"):
                     self._sv_conn.set("reader stopped")
+            elif kind == "lidar_scan":
+                self._lidar_scan  = payload
+                self._lidar_dirty = True
+                self.lidar_scans += 1
+                self._lidar_nodata_warned = False
+            elif kind == "lidar_status":
+                self._sv_lidar_status.set(str(payload))
+                self._lbl_lidar_status.configure(bootstyle="success")
+            elif kind == "lidar_error":
+                self._sv_lidar_status.set(f"erro: {payload}")
+                self._lbl_lidar_status.configure(bootstyle="danger")
+            elif kind == "lidar_stopped":
+                self._lidar_running = False
+                self._lidar_scan    = None
+                self._lidar_dirty   = True
+                self._update_lidar_buttons()
+                if not self._sv_lidar_status.get().startswith("erro:"):
+                    self._sv_lidar_status.set("parado")
+                    self._lbl_lidar_status.configure(bootstyle="secondary")
 
     def _handle_packet(self, pkt: Dict[str, Any]) -> None:
         self.valid_packets += 1
@@ -1120,6 +1558,11 @@ class WheelchairControlGUI:
             self.visual_omega_right,   self.filtered_omega_right, self.enc_interp_alpha)
         self._update_encoder_display()
 
+        # LIDAR — only redraw when a fresh scan arrived (≈10 Hz, not every frame)
+        if self._lidar_dirty:
+            self._render_lidar()
+            self._lidar_dirty = False
+
         if not self.closing:
             self.root.after(self.gui_update_ms, self._gui_frame)
 
@@ -1191,6 +1634,128 @@ class WheelchairControlGUI:
             self._sv_enc_status.set(self.enc_status)
             self._lbl_enc_status.configure(bootstyle="secondary")
 
+    # ── LIDAR render ──────────────────────────────────────────────────────────
+
+    def _render_lidar(self) -> None:
+        c     = self._lidar_canvas
+        items = self._lidar_point_items
+        scan  = self._lidar_scan
+
+        if not scan:
+            # Hide everything (stopped / no data)
+            for i in range(self._lidar_shown):
+                c.itemconfigure(items[i], state="hidden")
+            self._lidar_shown = 0
+            c.itemconfigure(self._lidar_nearest_item, state="hidden")
+            self._sv_lidar_nearest.set("—")
+            self._sv_lidar_pts.set("0 pts")
+            self._sv_lidar_q.set("q —")
+            self._sv_lidar_hz.set(f"{self._lidar_hz:.1f} Hz"
+                                  if self._lidar_running else "— Hz")
+            for key in self._sv_lidar_sector:
+                self._apply_lidar_sector(key, math.inf)
+            return
+
+        cx     = cy = LIDAR_CANVAS / 2
+        draw_r = LIDAR_CANVAS / 2 - LIDAR_MARGIN
+        offset = self._lidar_angle_offset
+        sign   = -1.0 if self._lidar_flip else 1.0
+        q_min  = self._lidar_quality_min
+        r_min  = self._lidar_min_range
+        r_max  = self._lidar_max_range
+        pr     = LIDAR_POINT_R
+
+        sector = {"F": math.inf, "B": math.inf, "L": math.inf, "R": math.inf}
+        nearest = math.inf
+        nearest_xy: Optional[Tuple[float, float]] = None
+        q_sum  = 0
+        n      = 0
+
+        for quality, angle_deg, dist_mm in scan:
+            if quality < q_min:
+                continue
+            d = dist_mm / 1000.0
+            if d <= 0.0 or d < r_min or d > r_max:
+                continue
+
+            a  = (angle_deg * sign + offset) % 360.0
+            th = math.radians(a)
+            rr = min(d, r_max) / r_max * draw_r
+            x  = cx + rr * math.sin(th)
+            y  = cy - rr * math.cos(th)
+
+            if n < len(items):
+                c.coords(items[n], x - pr, y - pr, x + pr, y + pr)
+
+            # Sector classification (0°=front, clockwise)
+            if a < 45.0 or a >= 315.0:
+                key = "F"
+            elif a < 135.0:
+                key = "R"
+            elif a < 225.0:
+                key = "B"
+            else:
+                key = "L"
+            if d < sector[key]:
+                sector[key] = d
+            if d < nearest:
+                nearest    = d
+                nearest_xy = (x, y)
+
+            q_sum += quality
+            n     += 1
+
+        # Toggle item visibility only across the changed range
+        shown = min(n, len(items))
+        if shown > self._lidar_shown:
+            for i in range(self._lidar_shown, shown):
+                c.itemconfigure(items[i], state="normal")
+        elif shown < self._lidar_shown:
+            for i in range(shown, self._lidar_shown):
+                c.itemconfigure(items[i], state="hidden")
+        self._lidar_shown = shown
+
+        # Nearest marker
+        if nearest_xy is not None:
+            x, y = nearest_xy
+            m = pr + 3
+            c.coords(self._lidar_nearest_item, x - m, y - m, x + m, y + m)
+            c.itemconfigure(self._lidar_nearest_item, state="normal")
+            a_near = (math.degrees(math.atan2(x - cx, cy - y))) % 360.0
+            self._sv_lidar_nearest.set(f"{nearest:.2f} m @ {a_near:3.0f}°")
+        else:
+            c.itemconfigure(self._lidar_nearest_item, state="hidden")
+            self._sv_lidar_nearest.set("—")
+
+        for key, d in sector.items():
+            self._apply_lidar_sector(key, d)
+
+        self._sv_lidar_hz.set(f"{self._lidar_hz:.1f} Hz")
+        self._sv_lidar_pts.set(f"{n} pts")
+        self._sv_lidar_q.set(f"q {q_sum / n:.0f}" if n else "q —")
+
+    def _apply_lidar_sector(self, key: str, d: float) -> None:
+        sv  = self._sv_lidar_sector[key]
+        lbl = self._lbl_lidar_sector[key]
+        if not math.isfinite(d):
+            sv.set("—")
+            lbl.configure(bootstyle="secondary")
+        elif d <= LIDAR_DANGER_M:
+            sv.set(f"{d:.2f}")
+            lbl.configure(bootstyle="danger")
+        elif d <= LIDAR_WARN_M:
+            sv.set(f"{d:.2f}")
+            lbl.configure(bootstyle="warning")
+        else:
+            sv.set(f"{d:.2f}")
+            lbl.configure(bootstyle="success")
+
+    def _update_lidar_buttons(self) -> None:
+        self._btn_lidar_start.configure(
+            state=DISABLED if self._lidar_running else NORMAL)
+        self._btn_lidar_stop.configure(
+            state=NORMAL if self._lidar_running else DISABLED)
+
     # ── Age ticker ────────────────────────────────────────────────────────────
 
     def _tick_age(self) -> None:
@@ -1199,6 +1764,26 @@ class WheelchairControlGUI:
         else:
             ms = (time.monotonic() - self.last_packet_time) * 1000
             self._sv_age.set(f"{ms:.0f} ms")
+
+        # LIDAR scan-rate estimate over a ~1 s window
+        now = time.monotonic()
+        if self._lidar_hz_t0 is None:
+            self._lidar_hz_t0 = now
+            self._lidar_hz_n0 = self.lidar_scans
+        elif now - self._lidar_hz_t0 >= 1.0:
+            self._lidar_hz = (self.lidar_scans - self._lidar_hz_n0) / (now - self._lidar_hz_t0)
+            self._lidar_hz_t0 = now
+            self._lidar_hz_n0 = self.lidar_scans
+
+        # Watchdog: driver up but no LaserScan messages after a grace period.
+        if (self._lidar_running and not self._lidar_nodata_warned
+                and self.lidar_scans == 0 and self._lidar_start_t is not None
+                and now - self._lidar_start_t > 8.0
+                and not self._sv_lidar_status.get().startswith("erro")):
+            self._sv_lidar_status.set("sem mensagens no tópico — driver subindo? confira a porta")
+            self._lbl_lidar_status.configure(bootstyle="warning")
+            self._lidar_nodata_warned = True
+
         if not self.closing:
             self.root.after(AGE_UPDATE_MS, self._tick_age)
 
@@ -1342,6 +1927,35 @@ class WheelchairControlGUI:
         self._var_enc_interp.set(ENC_INTERP_ALPHA)
         self._var_enc_max_omega.set(ENC_MAX_OMEGA)
 
+    # ── LIDAR handlers ────────────────────────────────────────────────────────
+
+    def _on_lidar_start(self) -> None:
+        if self._lidar_running:
+            return
+        port  = self._var_lidar_port.get().strip()  or LIDAR_DEFAULT_PORT
+        topic = self._var_lidar_topic.get().strip() or LIDAR_DEFAULT_TOPIC
+        self._lidar_stop = threading.Event()
+        self._lidar_thread = threading.Thread(
+            target=lidar_ros_reader,
+            args=(topic, port, self.event_queue, self._lidar_stop),
+            name="lidar-ros-reader",
+            daemon=True,
+        )
+        self._lidar_running = True
+        self._lidar_start_t = time.monotonic()
+        self._lidar_nodata_warned = False
+        self._sv_lidar_status.set("iniciando driver…")
+        self._lbl_lidar_status.configure(bootstyle="info")
+        self._update_lidar_buttons()
+        self._lidar_thread.start()
+
+    def _on_lidar_stop(self) -> None:
+        if self._lidar_stop is not None:
+            self._lidar_stop.set()
+        self._sv_lidar_status.set("parando…")
+        self._lbl_lidar_status.configure(bootstyle="secondary")
+        # Buttons re-enable when the thread emits "lidar_stopped".
+
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def _on_close(self) -> None:
@@ -1351,11 +1965,15 @@ class WheelchairControlGUI:
         self._on_stop_stream()
         self._send_stop()
         self.stop_event.set()
+        if self._lidar_stop is not None:
+            self._lidar_stop.set()
         self._sv_conn.set("closing…")
         self._wait_for_reader()
 
     def _wait_for_reader(self) -> None:
-        if self.reader_thread.is_alive():
+        lidar_alive = (self._lidar_thread is not None
+                       and self._lidar_thread.is_alive())
+        if self.reader_thread.is_alive() or lidar_alive:
             self.root.after(50, self._wait_for_reader)
             return
         self.root.destroy()
@@ -1381,23 +1999,34 @@ def main() -> int:
 
     event_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
     stop_event = threading.Event()
-    reader = threading.Thread(
-        target=serial_reader,
-        args=(serial, args.port, args.baud, event_queue, stop_event),
-        name="serial-reader",
-        daemon=True,
-    )
+
+    if args.port:
+        reader = threading.Thread(
+            target=serial_reader,
+            args=(serial, args.port, args.baud, event_queue, stop_event),
+            name="serial-reader",
+            daemon=True,
+        )
+    else:
+        # LIDAR-only mode: no ESP32 — an idle thread keeps the shutdown path simple.
+        reader = threading.Thread(target=lambda: None,
+                                  name="serial-reader-idle", daemon=True)
 
     WheelchairControlGUI(
         root, event_queue, stop_event, reader,
         filter_alpha=args.filter_alpha,
         interp_alpha=args.interp_alpha,
         gui_update_ms=args.gui_update_ms,
+        esp_port=args.port,
+        lidar_port=args.lidar,
+        lidar_topic=args.lidar_topic,
     )
-    reader.start()
+    if args.port:
+        reader.start()
     root.mainloop()
     stop_event.set()
-    reader.join(timeout=1)
+    if args.port:
+        reader.join(timeout=1)
     return 0
 
 

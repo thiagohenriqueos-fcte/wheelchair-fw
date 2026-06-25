@@ -1,2 +1,10 @@
 pyserial
 ttkbootstrap>=1.10.1
+
+# LIDAR (RPLIDAR C1) is consumed via ROS2: the GUI launches sllidar_ros2 and
+# subscribes to /scan. rclpy / sensor_msgs come from the sourced ROS2 (Jazzy)
+# environment, NOT from pip. When the GUI runs inside this venv, these
+# pure-Python deps are required so the ROS2 Python packages import correctly:
+numpy
+pyyaml
+setuptools
