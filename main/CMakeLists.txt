@@ -26,5 +26,4 @@ idf_component_register(
         esp_driver_pcnt
         ${SERIAL_DRIVER_COMPONENT}
         esp_timer
-        json
 )
