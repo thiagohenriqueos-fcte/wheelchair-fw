@@ -61,6 +61,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 import ttkbootstrap as ttk  # drop-in replacement for tkinter.ttk
@@ -200,6 +201,30 @@ C_IMU_SKY    = "#1e3a5f"
 C_IMU_GROUND = "#5f4a2a"
 C_IMU_HORIZON = "#cdd6f4"
 C_IMU_NEEDLE = "#f38ba8"
+
+
+# ── Velocity estimation (from IMU) ────────────────────────────────────────────
+#
+# Linear velocity is integrated from the forward (y) accelerometer; angular
+# velocity is the z gyro (already a rate). Accel integration drifts, so a tare
+# (bias capture), ZUPT (zero-velocity update when still) and a gentle leak keep
+# it bounded — treat the value as a reference, not a precise measurement.
+
+VEL_GRAVITY      = 9.80665      # m/s² per g
+VEL_HIST_SECONDS = 10.0         # strip-chart window
+VEL_SAMPLE_HZ    = 20           # ≈ imu_data emit rate
+VEL_HIST_LEN     = int(VEL_HIST_SECONDS * VEL_SAMPLE_HZ)
+VEL_LEAK         = 0.05         # gentle drift bound [1/s] (exp decay)
+VEL_ZUPT_A       = 0.15         # m/s² — "still" accel threshold
+VEL_ZUPT_W       = 2.0          # °/s — "still" yaw-rate threshold
+VEL_ZUPT_HOLD    = 0.30         # s still before zeroing velocity
+VEL_DT_MAX       = 0.50         # s — skip integration across longer gaps
+
+VEL_PLOT_W = 420
+VEL_PLOT_H = 110
+
+C_VEL_LIN = "#89b4fa"           # linear-velocity trace
+C_VEL_ANG = "#f9e2af"           # angular-velocity trace
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -602,6 +627,18 @@ class WheelchairControlGUI:
         self._imu_init_port = imu_port or IMU_DEFAULT_PORT
         self._imu_init_baud = imu_baud
 
+        # Velocity estimation (integrated from the IMU) + pop-out window
+        self._vel_win: Optional[Any] = None
+        self._vel_v   = 0.0           # integrated linear velocity [m/s]
+        self._vel_wz  = 0.0           # angular velocity (z gyro) [°/s]
+        self._vel_ay_bias = 0.0       # forward-accel bias [g] captured by tare
+        self._vel_last_t: Optional[float] = None
+        self._vel_zupt = True
+        self._vel_still_since: Optional[float] = None
+        self._vel_hist_v: "deque[float]" = deque(maxlen=VEL_HIST_LEN)
+        self._vel_hist_w: "deque[float]" = deque(maxlen=VEL_HIST_LEN)
+        self._vel_dirty = False
+
         self._build_ui()
         if self.esp_port is None:
             self._sv_conn.set("sem ESP — modo LIDAR")
@@ -738,6 +775,9 @@ class WheelchairControlGUI:
         ttk.Button(tb, text="✕  Exit Fullscreen", bootstyle="secondary-outline",
                    command=self._exit_fullscreen, padding=(8, 4)
                    ).pack(side=LEFT)
+        ttk.Button(tb, text="📈  Velocidades (IMU)", bootstyle="info-outline",
+                   command=self._open_velocity_window, padding=(8, 4)
+                   ).pack(side=LEFT, padx=(12, 0))
 
     # ── Joystick panel ────────────────────────────────────────────────────────
 
@@ -1421,6 +1461,160 @@ class WheelchairControlGUI:
         self._sv_imu_status.set("parando…")
         self._lbl_imu_status.configure(bootstyle="secondary")
 
+    # ── Velocity estimation (from IMU) ────────────────────────────────────────
+
+    def _integrate_velocity(self, imu: Dict[str, float]) -> None:
+        """Integrate forward accel → linear velocity; take z gyro as ω. Runs on
+        every imu_data sample with real wall-clock dt (drift-bounded via leak +
+        ZUPT)."""
+        now = time.monotonic()
+        if self._vel_last_t is None:
+            self._vel_last_t = now
+            return
+        dt = now - self._vel_last_t
+        self._vel_last_t = now
+        if dt <= 0.0 or dt > VEL_DT_MAX:
+            return
+
+        a  = (imu.get("ay", 0.0) - self._vel_ay_bias) * VEL_GRAVITY   # m/s²
+        wz = imu.get("wz", 0.0)                                       # °/s
+
+        self._vel_v += a * dt
+        self._vel_v *= math.exp(-VEL_LEAK * dt)                       # gentle leak
+
+        if self._vel_zupt:
+            if abs(a) < VEL_ZUPT_A and abs(wz) < VEL_ZUPT_W:
+                if self._vel_still_since is None:
+                    self._vel_still_since = now
+                elif now - self._vel_still_since > VEL_ZUPT_HOLD:
+                    self._vel_v = 0.0
+            else:
+                self._vel_still_since = None
+
+        self._vel_wz = wz
+        self._vel_hist_v.append(self._vel_v)
+        self._vel_hist_w.append(wz)
+        self._vel_dirty = True
+
+    def _open_velocity_window(self) -> None:
+        if self._vel_win is not None and self._vel_win.winfo_exists():
+            self._vel_win.lift()
+            return
+        win = ttk.Toplevel(self.root)
+        win.title("Velocidades estimadas (IMU)")
+        win.protocol("WM_DELETE_WINDOW", self._close_velocity_window)
+        self._vel_win = win
+        self._build_velocity_window(win)
+        self._draw_velocity_plots()
+
+    def _close_velocity_window(self) -> None:
+        if self._vel_win is not None:
+            self._vel_win.destroy()
+            self._vel_win = None
+
+    def _build_velocity_window(self, win: Any) -> None:
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill=BOTH, expand=YES)
+
+        self._sv_vel_v = tk.StringVar(value="—")
+        self._sv_vel_w = tk.StringVar(value="—")
+
+        hv = ttk.Frame(frm)
+        hv.pack(fill=X)
+        ttk.Label(hv, text="Velocidade linear   v = ∫aᵧ dt",
+                  foreground=C_MUTED, font=("", 9)).pack(side=LEFT)
+        ttk.Label(hv, textvariable=self._sv_vel_v, font=("Courier", 13, "bold"),
+                  bootstyle="info").pack(side=RIGHT)
+        self._vel_canvas_v = tk.Canvas(
+            frm, width=VEL_PLOT_W, height=VEL_PLOT_H, background=C_CANVAS_BG,
+            highlightthickness=1, highlightbackground=C_CIRCLE)
+        self._vel_canvas_v.pack(pady=(2, 10))
+        self._vel_line_v, self._vel_scale_v = self._init_strip(
+            self._vel_canvas_v, C_VEL_LIN)
+
+        hw = ttk.Frame(frm)
+        hw.pack(fill=X)
+        ttk.Label(hw, text="Velocidade angular   ω_z (giroscópio)",
+                  foreground=C_MUTED, font=("", 9)).pack(side=LEFT)
+        ttk.Label(hw, textvariable=self._sv_vel_w, font=("Courier", 13, "bold"),
+                  bootstyle="warning").pack(side=RIGHT)
+        self._vel_canvas_w = tk.Canvas(
+            frm, width=VEL_PLOT_W, height=VEL_PLOT_H, background=C_CANVAS_BG,
+            highlightthickness=1, highlightbackground=C_CIRCLE)
+        self._vel_canvas_w.pack(pady=(2, 10))
+        self._vel_line_w, self._vel_scale_w = self._init_strip(
+            self._vel_canvas_w, C_VEL_ANG)
+
+        ctl = ttk.Frame(frm)
+        ctl.pack(fill=X)
+        ttk.Button(ctl, text="Tara (parado)", bootstyle="secondary-outline",
+                   command=self._on_vel_tare, padding=(8, 3)).pack(
+            side=LEFT, padx=(0, 6))
+        ttk.Button(ctl, text="Zerar v", bootstyle="secondary-outline",
+                   command=self._on_vel_reset, padding=(8, 3)).pack(
+            side=LEFT, padx=(0, 6))
+        self._var_vel_zupt = tk.BooleanVar(value=self._vel_zupt)
+        ttk.Checkbutton(ctl, text="ZUPT (zera v parado)",
+                        variable=self._var_vel_zupt, command=self._on_vel_zupt,
+                        bootstyle="round-toggle").pack(side=LEFT)
+
+        ttk.Label(
+            frm,
+            text="⚠  v é integrada do acelerômetro e sofre deriva. Use Tara com "
+                 "a cadeira parada e nivelada; ZUPT zera v ao detectar parada. "
+                 "Trate como referência, não medida precisa.",
+            foreground=C_MUTED, font=("", 8), wraplength=VEL_PLOT_W,
+            justify=LEFT).pack(fill=X, pady=(10, 0))
+
+    def _init_strip(self, canvas: tk.Canvas, color: str) -> Tuple[int, int]:
+        mid = VEL_PLOT_H / 2
+        canvas.create_line(0, mid, VEL_PLOT_W, mid, fill=C_CANVAS_GRID)
+        line  = canvas.create_line(0, mid, 0, mid, fill=color, width=2)
+        scale = canvas.create_text(VEL_PLOT_W - 4, 4, anchor="ne",
+                                   fill=C_MUTED, font=("", 7), text="")
+        return line, scale
+
+    def _draw_velocity_plots(self) -> None:
+        if self._vel_win is None or not self._vel_win.winfo_exists():
+            return
+        self._sv_vel_v.set(f"{self._vel_v:+.2f} m/s")
+        self._sv_vel_w.set(
+            f"{self._vel_wz:+.1f} °/s   ({math.radians(self._vel_wz):+.2f} rad/s)")
+        self._draw_strip(self._vel_canvas_v, self._vel_line_v,
+                         self._vel_scale_v, self._vel_hist_v, 0.5, "m/s")
+        self._draw_strip(self._vel_canvas_w, self._vel_line_w,
+                         self._vel_scale_w, self._vel_hist_w, 50.0, "°/s")
+
+    def _draw_strip(self, canvas: tk.Canvas, line: int, scale: int,
+                    hist: "deque[float]", min_range: float, unit: str) -> None:
+        mid = VEL_PLOT_H / 2
+        if len(hist) < 2:
+            canvas.coords(line, 0, mid, VEL_PLOT_W, mid)
+            canvas.itemconfigure(scale, text="")
+            return
+        m = max(min_range, max(abs(v) for v in hist))
+        span = VEL_HIST_LEN - 1
+        amp = mid - 4
+        coords = []
+        for i, v in enumerate(hist):
+            x = i / span * VEL_PLOT_W
+            y = mid - (v / m) * amp
+            coords += [x, y]
+        canvas.coords(line, *coords)
+        canvas.itemconfigure(scale, text=f"escala ±{m:.1f} {unit}")
+
+    def _on_vel_tare(self) -> None:
+        self._vel_ay_bias = self._imu.get("ay", 0.0)
+        self._vel_v = 0.0
+        self._vel_still_since = None
+
+    def _on_vel_reset(self) -> None:
+        self._vel_v = 0.0
+        self._vel_still_since = None
+
+    def _on_vel_zupt(self) -> None:
+        self._vel_zupt = self._var_vel_zupt.get()
+
     # ── Safety panel ──────────────────────────────────────────────────────────
 
     def _build_safety_panel(self, parent: ttk.Frame) -> None:
@@ -1485,6 +1679,7 @@ class WheelchairControlGUI:
             elif kind == "imu_data":
                 self._imu = payload
                 self._imu_dirty = True
+                self._integrate_velocity(payload)
             elif kind == "imu_status":
                 self._sv_imu_status.set(str(payload))
                 self._lbl_imu_status.configure(bootstyle="success")
@@ -1584,6 +1779,11 @@ class WheelchairControlGUI:
         if self._imu_dirty:
             self._update_imu_display()
             self._imu_dirty = False
+
+        # Velocity window strip charts (only when open)
+        if self._vel_dirty:
+            self._vel_dirty = False
+            self._draw_velocity_plots()
 
         if not self.closing:
             self.root.after(self.gui_update_ms, self._gui_frame)
