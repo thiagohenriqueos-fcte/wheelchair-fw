@@ -227,6 +227,23 @@ C_VEL_LIN = "#89b4fa"           # linear-velocity trace
 C_VEL_ANG = "#f9e2af"           # angular-velocity trace
 
 
+# ── Pose / trajectory (dead-reckoning from IMU) ───────────────────────────────
+#
+# Heading from the IMU's fused yaw, position by integrating the estimated linear
+# velocity along that heading (unicycle model). Drifts over time — most precise
+# achievable without wheel encoders; LIDAR scan-matching would refine it.
+
+POSE_PLOT      = 420
+POSE_PATH_MAX  = 3000           # path points kept (decimated)
+POSE_PATH_STEP = 0.02           # m — min move before adding a path point
+POSE_MIN_SPAN  = 1.0            # m — minimum map span (avoid over-zoom)
+POSE_MARGIN    = 0.12           # auto-fit margin (fraction of canvas)
+
+C_POSE_PATH   = "#89b4fa"
+C_POSE_CHAIR  = "#a6e3a1"
+C_POSE_ORIGIN = "#6c7086"
+
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 def _pos_int(value: str) -> int:
@@ -639,6 +656,17 @@ class WheelchairControlGUI:
         self._vel_hist_w: "deque[float]" = deque(maxlen=VEL_HIST_LEN)
         self._vel_dirty = False
 
+        # Pose / trajectory dead-reckoning + pop-out map window
+        self._pose_win: Optional[Any] = None
+        self._pose_x = 0.0
+        self._pose_y = 0.0
+        self._pose_theta = 0.0        # heading [rad]
+        self._pose_yaw0: Optional[float] = None
+        self._pose_dist = 0.0
+        self._pose_path: "deque[Tuple[float, float]]" = deque(maxlen=POSE_PATH_MAX)
+        self._pose_dirty = False
+        self._pose_last_draw = 0.0
+
         self._build_ui()
         if self.esp_port is None:
             self._sv_conn.set("sem ESP — modo LIDAR")
@@ -778,6 +806,9 @@ class WheelchairControlGUI:
         ttk.Button(tb, text="📈  Velocidades (IMU)", bootstyle="info-outline",
                    command=self._open_velocity_window, padding=(8, 4)
                    ).pack(side=LEFT, padx=(12, 0))
+        ttk.Button(tb, text="🗺  Trajetória / Pose", bootstyle="info-outline",
+                   command=self._open_pose_window, padding=(8, 4)
+                   ).pack(side=LEFT, padx=(6, 0))
 
     # ── Joystick panel ────────────────────────────────────────────────────────
 
@@ -1496,6 +1527,24 @@ class WheelchairControlGUI:
         self._vel_hist_w.append(wz)
         self._vel_dirty = True
 
+        # Pose dead-reckoning: heading from IMU yaw, translate by v along heading.
+        yaw = imu.get("yaw")
+        if yaw is not None:
+            if self._pose_yaw0 is None:
+                self._pose_yaw0 = yaw
+            self._pose_theta = math.radians(yaw - self._pose_yaw0)
+        th = self._pose_theta
+        dx = self._vel_v * math.cos(th) * dt
+        dy = self._vel_v * math.sin(th) * dt
+        self._pose_x += dx
+        self._pose_y += dy
+        self._pose_dist += math.hypot(dx, dy)
+        if (not self._pose_path or
+                math.hypot(self._pose_x - self._pose_path[-1][0],
+                           self._pose_y - self._pose_path[-1][1]) > POSE_PATH_STEP):
+            self._pose_path.append((self._pose_x, self._pose_y))
+        self._pose_dirty = True
+
     def _open_velocity_window(self) -> None:
         if self._vel_win is not None and self._vel_win.winfo_exists():
             self._vel_win.lift()
@@ -1614,6 +1663,116 @@ class WheelchairControlGUI:
 
     def _on_vel_zupt(self) -> None:
         self._vel_zupt = self._var_vel_zupt.get()
+
+    # ── Pose / trajectory window ──────────────────────────────────────────────
+
+    def _open_pose_window(self) -> None:
+        if self._pose_win is not None and self._pose_win.winfo_exists():
+            self._pose_win.lift()
+            return
+        win = ttk.Toplevel(self.root)
+        win.title("Trajetória / Pose (dead-reckoning)")
+        win.protocol("WM_DELETE_WINDOW", self._close_pose_window)
+        self._pose_win = win
+        self._build_pose_window(win)
+        self._draw_pose()
+
+    def _close_pose_window(self) -> None:
+        if self._pose_win is not None:
+            self._pose_win.destroy()
+            self._pose_win = None
+
+    def _build_pose_window(self, win: Any) -> None:
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill=BOTH, expand=YES)
+
+        c = tk.Canvas(frm, width=POSE_PLOT, height=POSE_PLOT,
+                      background=C_CANVAS_BG, highlightthickness=1,
+                      highlightbackground=C_CIRCLE)
+        c.pack()
+        self._pose_canvas = c
+        self._pose_origin_h = c.create_line(0, 0, 0, 0, fill=C_POSE_ORIGIN)
+        self._pose_origin_v = c.create_line(0, 0, 0, 0, fill=C_POSE_ORIGIN)
+        self._pose_line  = c.create_line(0, 0, 0, 0, fill=C_POSE_PATH, width=2)
+        self._pose_chair = c.create_polygon(0, 0, 0, 0, 0, 0,
+                                            fill=C_POSE_CHAIR, outline="")
+        self._pose_scale_txt = c.create_text(
+            POSE_PLOT - 4, 4, anchor="ne", fill=C_MUTED, font=("", 7), text="")
+
+        info = ttk.Frame(frm)
+        info.pack(fill=X, pady=(8, 0))
+        self._sv_pose = tk.StringVar(value="—")
+        ttk.Label(info, textvariable=self._sv_pose,
+                  font=("Courier", 10)).pack(side=LEFT)
+        ttk.Button(info, text="Zerar pose", bootstyle="secondary-outline",
+                   command=self._on_pose_reset, padding=(8, 3)).pack(side=RIGHT)
+
+        ttk.Label(
+            frm,
+            text="⚠  Pose por dead-reckoning (yaw do IMU + ∫velocidade). Deriva "
+                 "com o tempo; o triângulo verde é a cadeira apontando o sentido. "
+                 "Use 'Zerar pose' no ponto de partida.",
+            foreground=C_MUTED, font=("", 8), wraplength=POSE_PLOT,
+            justify=LEFT).pack(fill=X, pady=(8, 0))
+
+    def _draw_pose(self) -> None:
+        if self._pose_win is None or not self._pose_win.winfo_exists():
+            return
+        c = self._pose_canvas
+        pts = list(self._pose_path) + [(self._pose_x, self._pose_y)]
+        xs = [p[0] for p in pts] + [0.0]
+        ys = [p[1] for p in pts] + [0.0]
+        cxw = (min(xs) + max(xs)) / 2.0
+        cyw = (min(ys) + max(ys)) / 2.0
+        span = max(max(xs) - min(xs), max(ys) - min(ys), POSE_MIN_SPAN)
+        scale = (POSE_PLOT * (1.0 - 2.0 * POSE_MARGIN)) / span   # px per metre
+        half = POSE_PLOT / 2.0
+
+        def w2c(wx: float, wy: float) -> Tuple[float, float]:
+            return (half + (wx - cxw) * scale, half - (wy - cyw) * scale)
+
+        ox, oy = w2c(0.0, 0.0)
+        c.coords(self._pose_origin_h, ox - 8, oy, ox + 8, oy)
+        c.coords(self._pose_origin_v, ox, oy - 8, ox, oy + 8)
+
+        coords = []
+        for wx, wy in pts:
+            px, py = w2c(wx, wy)
+            coords += [px, py]
+        if len(coords) >= 4:
+            c.coords(self._pose_line, *coords)
+        else:
+            px, py = w2c(self._pose_x, self._pose_y)
+            c.coords(self._pose_line, px, py, px, py)
+
+        # Chair triangle (fixed pixel size) pointing along heading θ.
+        cxp, cyp = w2c(self._pose_x, self._pose_y)
+        th = self._pose_theta
+        s  = 11.0
+        fcx, fcy = math.cos(th), -math.sin(th)    # forward, in canvas axes
+        pcx, pcy = -math.sin(th), -math.cos(th)   # perpendicular, in canvas axes
+        bx, by = cxp - 0.6 * s * fcx, cyp - 0.6 * s * fcy
+        c.coords(
+            self._pose_chair,
+            cxp + s * fcx, cyp + s * fcy,
+            bx + 0.5 * s * pcx, by + 0.5 * s * pcy,
+            bx - 0.5 * s * pcx, by - 0.5 * s * pcy)
+
+        c.itemconfigure(self._pose_scale_txt,
+                        text=f"{scale:.0f} px/m · perc. {self._pose_dist:.2f} m")
+        self._sv_pose.set(
+            f"x {self._pose_x:+.2f}  y {self._pose_y:+.2f} m   "
+            f"θ {math.degrees(self._pose_theta):+.0f}°   "
+            f"dist {self._pose_dist:.2f} m")
+
+    def _on_pose_reset(self) -> None:
+        self._pose_x = 0.0
+        self._pose_y = 0.0
+        self._pose_dist = 0.0
+        self._pose_yaw0 = self._imu.get("yaw")
+        self._pose_theta = 0.0
+        self._pose_path.clear()
+        self._pose_dirty = True
 
     # ── Safety panel ──────────────────────────────────────────────────────────
 
@@ -1784,6 +1943,14 @@ class WheelchairControlGUI:
         if self._vel_dirty:
             self._vel_dirty = False
             self._draw_velocity_plots()
+
+        # Pose map — throttled to ~10 Hz (path polyline can be large)
+        if self._pose_dirty:
+            now = time.monotonic()
+            if now - self._pose_last_draw > 0.1:
+                self._pose_dirty = False
+                self._pose_last_draw = now
+                self._draw_pose()
 
         if not self.closing:
             self.root.after(self.gui_update_ms, self._gui_frame)
