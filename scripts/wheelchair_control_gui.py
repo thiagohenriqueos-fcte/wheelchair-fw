@@ -1,19 +1,49 @@
 #!/usr/bin/env python3
-"""Wheelchair differential-drive control GUI + LIDAR — v0.9.0
+"""Wheelchair control GUI — differential drive + LIDAR + IMU — v0.9.0
 
-Usage (source the ROS2 env first for LIDAR, e.g. /opt/ros/jazzy/setup.bash):
-    python3 scripts/wheelchair_control_gui.py /dev/ttyUSB1 --lidar /dev/ttyUSB0
-    python3 scripts/wheelchair_control_gui.py --lidar /dev/ttyUSB0   # LIDAR only
+Three independent subsystems, each on its own serial port / thread; mix and
+match them freely. Source the ROS2 env first if you use the LIDAR, e.g.
+`source /opt/ros/jazzy/setup.bash` plus the sllidar workspace.
 
-The physical joystick is read by the ESP32, which runs the differential-drive
-control loop (mixing + accel/decel ramp + max-duty clamp). This GUI tunes those
-parameters and holds the operator safety gate: while ARMED it streams a
-`drive_cfg` keep-alive at 10 Hz, so if the GUI or USB link drops the firmware
-disarms within ~400 ms.
+How each mode is launched
+-------------------------
+  ESP32 / drive : positional port arg — connects immediately at launch.
+      python3 scripts/wheelchair_control_gui.py /dev/ttyUSB1
+  LIDAR         : --lidar PORT — pre-fills the LIDAR panel; press "Iniciar".
+      python3 scripts/wheelchair_control_gui.py --lidar /dev/ttyUSB0
+  IMU           : --imu PORT — pre-fills the IMU panel; press "Iniciar".
+      python3 scripts/wheelchair_control_gui.py --imu /dev/ttyACM0
 
-The optional RPLIDAR C1 is handled by the sllidar_ros2 driver: the GUI starts
-it and subscribes to its sensor_msgs/LaserScan on /scan, on its own thread.
-The ESP32 port is optional (omit for a LIDAR-only view).
+Only the ESP32 positional port auto-connects on start; --lidar and --imu just
+PRE-FILL their panel fields (you still click "Iniciar" in each panel). Every
+port can also be typed in the panels at runtime, so the flags are optional.
+
+Possible combinations (include only what you have plugged in)
+-------------------------------------------------------------
+  ESP only          : ... /dev/ttyUSB1
+  ESP + LIDAR       : ... /dev/ttyUSB1 --lidar /dev/ttyUSB0
+  ESP + IMU         : ... /dev/ttyUSB1 --imu /dev/ttyACM0
+  ESP + LIDAR + IMU : ... /dev/ttyUSB1 --lidar /dev/ttyUSB0 --imu /dev/ttyACM0
+  LIDAR only        : ... --lidar /dev/ttyUSB0        (omit the ESP port)
+  IMU only          : ... --imu /dev/ttyACM0          (omit the ESP port)
+  LIDAR + IMU       : ... --lidar /dev/ttyUSB0 --imu /dev/ttyACM0
+
+Typical ports on this rig: ESP32 = /dev/ttyUSB1 (CP2102), RPLIDAR C1 =
+/dev/ttyUSB0 (CP2102N), IMU = /dev/ttyACM0 (Nations N32L40x USB-CDC @ 9600).
+
+Subsystems
+----------
+  • ESP32 / drive — the physical joystick is read by the ESP32, which runs the
+    differential-drive loop (mixing + accel/decel ramp + max-duty clamp). The
+    GUI tunes those parameters and holds the operator safety gate: while ARMED
+    it streams a `drive_cfg` keep-alive at 10 Hz, so if the GUI or USB link
+    drops the firmware disarms within ~400 ms.
+  • LIDAR — the RPLIDAR C1 is handled by the sllidar_ros2 driver: the GUI starts
+    it (or reuses a running one) and subscribes to its sensor_msgs/LaserScan on
+    /scan, on its own thread.
+  • IMU — the Witmotion 603T is read directly (Witmotion 0x55 frames) and
+    configured via register commands (unlock + register + save) for
+    calibration and output rate.
 
 WARNING: arming makes the wheels move. Use with the chair suspended / no load
 until the behaviour is validated.
@@ -183,7 +213,7 @@ def _pos_int(value: str) -> int:
 
 def parse_arguments() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Wheelchair differential-drive control GUI + LIDAR.")
+        description="Wheelchair control GUI — differential drive + LIDAR + IMU.")
     p.add_argument("port", nargs="?", default=None,
                    help="ESP32 serial port, e.g. /dev/ttyUSB1 "
                         "(optional — omit to run LIDAR-only)")
