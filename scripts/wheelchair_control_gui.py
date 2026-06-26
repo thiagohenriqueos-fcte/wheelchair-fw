@@ -672,8 +672,7 @@ class WheelchairControlGUI:
         self._imu_init_port = imu_port or IMU_DEFAULT_PORT
         self._imu_init_baud = imu_baud
 
-        # Velocity estimation (integrated from the IMU) + pop-out window
-        self._vel_win: Optional[Any] = None
+        # Velocity estimation (integrated from the IMU)
         self._vel_v   = 0.0           # integrated linear velocity [m/s]
         self._vel_wz  = 0.0           # angular velocity (z gyro) [°/s]
         self._vel_ay_bias = 0.0       # forward-accel bias [g] captured by tare
@@ -684,8 +683,7 @@ class WheelchairControlGUI:
         self._vel_hist_w: "deque[float]" = deque(maxlen=VEL_HIST_LEN)
         self._vel_dirty = False
 
-        # Pose / trajectory dead-reckoning + pop-out map window
-        self._pose_win: Optional[Any] = None
+        # Pose / trajectory dead-reckoning (inline map panel)
         self._pose_x = 0.0
         self._pose_y = 0.0
         self._pose_theta = 0.0        # heading [rad]
@@ -764,7 +762,13 @@ class WheelchairControlGUI:
         imu_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self._build_imu_panel(imu_frame)
 
-        self._build_safety_panel(outer)  # row 5
+        odom_frame = ttk.Labelframe(
+            outer, text="Odometria — Pose & Velocidades (IMU / LIDAR)",
+            padding=10, bootstyle="secondary")
+        odom_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self._build_odometry_panel(odom_frame)
+
+        self._build_safety_panel(outer)  # row 6
 
         self.root.bind("<F11>",    lambda _e: self._toggle_fullscreen())
         self.root.bind("<Escape>", lambda _e: self._exit_fullscreen())
@@ -833,12 +837,6 @@ class WheelchairControlGUI:
         ttk.Button(tb, text="✕  Exit Fullscreen", bootstyle="secondary-outline",
                    command=self._exit_fullscreen, padding=(8, 4)
                    ).pack(side=LEFT)
-        ttk.Button(tb, text="📈  Velocidades (IMU)", bootstyle="info-outline",
-                   command=self._open_velocity_window, padding=(8, 4)
-                   ).pack(side=LEFT, padx=(12, 0))
-        ttk.Button(tb, text="🗺  Trajetória / Pose", bootstyle="info-outline",
-                   command=self._open_pose_window, padding=(8, 4)
-                   ).pack(side=LEFT, padx=(6, 0))
 
     # ── Joystick panel ────────────────────────────────────────────────────────
 
@@ -1584,24 +1582,17 @@ class WheelchairControlGUI:
                 self._pose_dist += d
         self._pose_path.append((x, y))
 
-    def _open_velocity_window(self) -> None:
-        if self._vel_win is not None and self._vel_win.winfo_exists():
-            self._vel_win.lift()
-            return
-        win = ttk.Toplevel(self.root)
-        win.title("Velocidades estimadas (IMU)")
-        win.protocol("WM_DELETE_WINDOW", self._close_velocity_window)
-        self._vel_win = win
-        self._build_velocity_window(win)
-        self._draw_velocity_plots()
+    def _build_odometry_panel(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(1, weight=1)
+        pose_frame = ttk.Frame(parent)
+        pose_frame.grid(row=0, column=0, sticky="n", padx=(0, 12))
+        self._build_pose_panel(pose_frame)
+        vel_frame = ttk.Frame(parent)
+        vel_frame.grid(row=0, column=1, sticky="nsew")
+        self._build_velocity_panel(vel_frame)
 
-    def _close_velocity_window(self) -> None:
-        if self._vel_win is not None:
-            self._vel_win.destroy()
-            self._vel_win = None
-
-    def _build_velocity_window(self, win: Any) -> None:
-        frm = ttk.Frame(win, padding=12)
+    def _build_velocity_panel(self, parent: ttk.Frame) -> None:
+        frm = ttk.Frame(parent)
         frm.pack(fill=BOTH, expand=YES)
 
         self._sv_vel_v = tk.StringVar(value="—")
@@ -1663,8 +1654,6 @@ class WheelchairControlGUI:
         return line, scale
 
     def _draw_velocity_plots(self) -> None:
-        if self._vel_win is None or not self._vel_win.winfo_exists():
-            return
         self._sv_vel_v.set(f"{self._vel_v:+.2f} m/s")
         self._sv_vel_w.set(
             f"{self._vel_wz:+.1f} °/s   ({math.radians(self._vel_wz):+.2f} rad/s)")
@@ -1703,26 +1692,10 @@ class WheelchairControlGUI:
     def _on_vel_zupt(self) -> None:
         self._vel_zupt = self._var_vel_zupt.get()
 
-    # ── Pose / trajectory window ──────────────────────────────────────────────
+    # ── Pose / trajectory panel ───────────────────────────────────────────────
 
-    def _open_pose_window(self) -> None:
-        if self._pose_win is not None and self._pose_win.winfo_exists():
-            self._pose_win.lift()
-            return
-        win = ttk.Toplevel(self.root)
-        win.title("Trajetória / Pose (dead-reckoning)")
-        win.protocol("WM_DELETE_WINDOW", self._close_pose_window)
-        self._pose_win = win
-        self._build_pose_window(win)
-        self._draw_pose()
-
-    def _close_pose_window(self) -> None:
-        if self._pose_win is not None:
-            self._pose_win.destroy()
-            self._pose_win = None
-
-    def _build_pose_window(self, win: Any) -> None:
-        frm = ttk.Frame(win, padding=12)
+    def _build_pose_panel(self, parent: ttk.Frame) -> None:
+        frm = ttk.Frame(parent)
         frm.pack(fill=BOTH, expand=YES)
 
         c = tk.Canvas(frm, width=POSE_PLOT, height=POSE_PLOT,
@@ -1756,8 +1729,6 @@ class WheelchairControlGUI:
             justify=LEFT).pack(fill=X, pady=(8, 0))
 
     def _draw_pose(self) -> None:
-        if self._pose_win is None or not self._pose_win.winfo_exists():
-            return
         c = self._pose_canvas
         pts = list(self._pose_path) + [(self._pose_x, self._pose_y)]
         xs = [p[0] for p in pts] + [0.0]
@@ -1820,7 +1791,7 @@ class WheelchairControlGUI:
     def _build_safety_panel(self, parent: ttk.Frame) -> None:
         safety = ttk.Labelframe(parent, text="Safety", padding=10,
                                 bootstyle="warning")
-        safety.grid(row=5, column=0, columnspan=3, sticky=EW, pady=(4, 0))
+        safety.grid(row=6, column=0, columnspan=3, sticky=EW, pady=(4, 0))
         ttk.Label(
             safety,
             text="⚠  Ao ARMAR, o joystick físico move as rodas. Mantenha a "
