@@ -131,6 +131,47 @@ C_LIDAR_NEAREST = "#f38ba8"
 C_LIDAR_FRONT   = "#a6e3a1"
 
 
+# ── IMU (Witmotion 6xx — WIT standard protocol) ───────────────────────────────
+#
+# The IMU is read on its own USB-TTL port / thread (Witmotion 0x55 frames) and
+# configured by writing register commands (0xFF 0xAA addr lo hi) wrapped by an
+# unlock + save sequence. Connecting it straight to the Pi keeps config simple.
+
+IMU_DEFAULT_PORT = "/dev/ttyUSB2"
+IMU_DEFAULT_BAUD = 9600          # Witmotion TTL default (newer units: 115200)
+
+IMU_FRAME_LEN = 11
+IMU_HEADER    = 0x55
+IMU_ACC   = 0x51
+IMU_GYRO  = 0x52
+IMU_ANGLE = 0x53
+IMU_MAG   = 0x54
+
+# Register write protocol
+IMU_UNLOCK = bytes([0xFF, 0xAA, 0x69, 0x88, 0xB5])
+IMU_SAVE   = bytes([0xFF, 0xAA, 0x00, 0x00, 0x00])
+IMU_REG_SAVE  = 0x00
+IMU_REG_CALSW = 0x01
+IMU_REG_RRATE = 0x03
+# CALSW values
+IMU_CAL_NORMAL = 0x00
+IMU_CAL_ACCEL  = 0x01
+IMU_CAL_HEIGHT = 0x03
+IMU_CAL_YAW    = 0x04
+IMU_CAL_MAG    = 0x07
+
+# Return-rate menu: label → RRATE register value
+IMU_RATES = [("10 Hz", 0x06), ("20 Hz", 0x07), ("50 Hz", 0x08),
+             ("100 Hz", 0x09), ("200 Hz", 0x0B)]
+
+IMU_CANVAS = 180          # attitude indicator canvas (px)
+
+C_IMU_SKY    = "#1e3a5f"
+C_IMU_GROUND = "#5f4a2a"
+C_IMU_HORIZON = "#cdd6f4"
+C_IMU_NEEDLE = "#f38ba8"
+
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 def _pos_int(value: str) -> int:
@@ -152,6 +193,9 @@ def parse_arguments() -> argparse.Namespace:
                    help=f"RPLIDAR C1 serial port for the driver, e.g. {LIDAR_DEFAULT_PORT}")
     p.add_argument("--lidar-topic", default=LIDAR_DEFAULT_TOPIC,
                    help=f"LaserScan topic to subscribe (default {LIDAR_DEFAULT_TOPIC})")
+    p.add_argument("--imu", default=None,
+                   help=f"Witmotion IMU serial port to pre-fill, e.g. {IMU_DEFAULT_PORT}")
+    p.add_argument("--imu-baud", type=int, default=IMU_DEFAULT_BAUD)
     return p.parse_args()
 
 
@@ -351,6 +395,97 @@ def _stop_process_group(proc: subprocess.Popen) -> None:
             return
 
 
+# ── IMU reader thread (Witmotion 0x55 frames) ─────────────────────────────────
+
+def _imu_word(lo: int, hi: int) -> int:
+    """Little-endian signed 16-bit from a low/high byte pair."""
+    return int.from_bytes(bytes((lo, hi)), "little", signed=True)
+
+
+def parse_witmotion_frame(frame: bytes, state: Dict[str, float]) -> None:
+    """Decode one validated 11-byte 0x55 frame into `state` (physical units)."""
+    t = frame[1]
+    d = frame[2:10]
+    if t == IMU_ACC:
+        state["ax"]   = _imu_word(d[0], d[1]) / 32768.0 * 16.0
+        state["ay"]   = _imu_word(d[2], d[3]) / 32768.0 * 16.0
+        state["az"]   = _imu_word(d[4], d[5]) / 32768.0 * 16.0
+        state["temp"] = _imu_word(d[6], d[7]) / 100.0
+    elif t == IMU_GYRO:
+        state["wx"] = _imu_word(d[0], d[1]) / 32768.0 * 2000.0
+        state["wy"] = _imu_word(d[2], d[3]) / 32768.0 * 2000.0
+        state["wz"] = _imu_word(d[4], d[5]) / 32768.0 * 2000.0
+    elif t == IMU_ANGLE:
+        state["roll"]  = _imu_word(d[0], d[1]) / 32768.0 * 180.0
+        state["pitch"] = _imu_word(d[2], d[3]) / 32768.0 * 180.0
+        state["yaw"]   = _imu_word(d[4], d[5]) / 32768.0 * 180.0
+    elif t == IMU_MAG:
+        state["mx"] = float(_imu_word(d[0], d[1]))
+        state["my"] = float(_imu_word(d[2], d[3]))
+        state["mz"] = float(_imu_word(d[4], d[5]))
+
+
+def imu_reader(
+    port: str,
+    baud: int,
+    event_queue: "queue.Queue[Tuple[str, Any]]",
+    stop_event: threading.Event,
+) -> None:
+    """Read Witmotion frames; emit ("imu_data", state) ~20 Hz.
+
+    Hands the open serial connection back via ("imu_conn_ready", conn) so the GUI
+    can write config/calibration commands on it (under its own write lock) while
+    this thread keeps reading.
+    """
+    import serial as serial_module
+    try:
+        conn = serial_module.Serial(port=port, baudrate=baud, timeout=0.1)
+    except serial_module.SerialException as exc:
+        event_queue.put(("imu_error", str(exc)))
+        event_queue.put(("imu_stopped", None))
+        return
+
+    event_queue.put(("imu_conn_ready", conn))
+    event_queue.put(("imu_status", f"conectado: {port} @ {baud}"))
+
+    buf = bytearray()
+    state: Dict[str, float] = {}
+    last_emit = 0.0
+    try:
+        while not stop_event.is_set():
+            try:
+                data = conn.read(64)
+            except serial_module.SerialException as exc:
+                event_queue.put(("imu_error", str(exc)))
+                break
+            if not data:
+                continue
+            buf.extend(data)
+            while len(buf) >= IMU_FRAME_LEN:
+                if buf[0] != IMU_HEADER:
+                    del buf[0]
+                    continue
+                frame = bytes(buf[:IMU_FRAME_LEN])
+                if (sum(frame[:10]) & 0xFF) != frame[10]:
+                    del buf[0]           # bad checksum → resync one byte
+                    continue
+                parse_witmotion_frame(frame, state)
+                del buf[:IMU_FRAME_LEN]
+            if len(buf) > 4096:
+                del buf[:-IMU_FRAME_LEN]
+            now = time.monotonic()
+            if state and now - last_emit > 0.05:
+                event_queue.put(("imu_data", dict(state)))
+                last_emit = now
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        event_queue.put(("imu_conn_gone", None))
+        event_queue.put(("imu_stopped", None))
+
+
 # ── Main GUI class ────────────────────────────────────────────────────────────
 
 class WheelchairControlGUI:
@@ -365,6 +500,8 @@ class WheelchairControlGUI:
         esp_port: Optional[str] = None,
         lidar_port: Optional[str] = None,
         lidar_topic: str = LIDAR_DEFAULT_TOPIC,
+        imu_port: Optional[str] = None,
+        imu_baud: int = IMU_DEFAULT_BAUD,
     ) -> None:
         self.root          = root
         self.event_queue   = event_queue
@@ -422,6 +559,18 @@ class WheelchairControlGUI:
         self._lidar_quality_min  = LIDAR_QUALITY_DEFAULT
         self._lidar_init_port    = lidar_port or LIDAR_DEFAULT_PORT
         self._lidar_init_topic   = lidar_topic or LIDAR_DEFAULT_TOPIC
+
+        # IMU pipeline (Witmotion over USB-TTL — own thread; GUI writes config)
+        self._imu_thread: Optional[threading.Thread] = None
+        self._imu_stop:   Optional[threading.Event]  = None
+        self._imu_running = False
+        self._imu_conn: Optional[Any] = None
+        self._imu_write_lock = threading.Lock()
+        self._imu: Dict[str, float] = {}      # latest decoded values
+        self._imu_dirty = False
+        self._imu_mag_calibrating = False
+        self._imu_init_port = imu_port or IMU_DEFAULT_PORT
+        self._imu_init_baud = imu_baud
 
         self._build_ui()
         if self.esp_port is None:
@@ -485,7 +634,12 @@ class WheelchairControlGUI:
         lidar_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self._build_lidar_panel(lidar_frame)
 
-        self._build_safety_panel(outer)  # row 4
+        imu_frame = ttk.Labelframe(
+            outer, text="IMU  (Witmotion)", padding=10, bootstyle="secondary")
+        imu_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self._build_imu_panel(imu_frame)
+
+        self._build_safety_panel(outer)  # row 5
 
         self.root.bind("<F11>",    lambda _e: self._toggle_fullscreen())
         self.root.bind("<Escape>", lambda _e: self._exit_fullscreen())
@@ -976,12 +1130,273 @@ class WheelchairControlGUI:
             ttk.Label(parent, text=hint, foreground=C_MUTED,
                       font=("", 7)).grid(row=row, column=3, sticky=W, pady=3)
 
+    # ── IMU panel ─────────────────────────────────────────────────────────────
+
+    def _build_imu_panel(self, parent: ttk.Labelframe) -> None:
+        parent.columnconfigure(1, weight=1)
+
+        self._imu_canvas = tk.Canvas(
+            parent, width=IMU_CANVAS, height=IMU_CANVAS,
+            background=C_CANVAS_BG, highlightthickness=1,
+            highlightbackground=C_CIRCLE)
+        self._imu_canvas.grid(row=0, column=0, sticky="n", padx=(0, 12))
+        self._init_imu_canvas()
+
+        side = ttk.Frame(parent)
+        side.grid(row=0, column=1, sticky="nsew")
+        side.columnconfigure(0, weight=1)
+        self._build_imu_readings(side)
+        self._build_imu_controls(side)
+
+    def _init_imu_canvas(self) -> None:
+        c  = self._imu_canvas
+        cx = cy = IMU_CANVAS / 2
+        c.create_oval(4, 4, IMU_CANVAS - 4, IMU_CANVAS - 4, outline=C_CIRCLE)
+        # Dynamic horizon line (rotates with roll, shifts with pitch)
+        self._imu_horizon = c.create_line(
+            0, cy, IMU_CANVAS, cy, fill=C_IMU_HORIZON, width=2)
+        # Fixed aircraft reference symbol
+        c.create_line(cx - 32, cy, cx - 10, cy, fill=C_IMU_NEEDLE, width=3)
+        c.create_line(cx + 10, cy, cx + 32, cy, fill=C_IMU_NEEDLE, width=3)
+        c.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
+                      fill=C_IMU_NEEDLE, outline="")
+        self._imu_yaw_txt = c.create_text(
+            cx, IMU_CANVAS - 12, fill=C_MUTED, font=("", 8), text="yaw —")
+
+    def _build_imu_readings(self, parent: ttk.Frame) -> None:
+        rf = ttk.Labelframe(parent, text="Leitura", padding=8,
+                            bootstyle="secondary")
+        rf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        rf.columnconfigure(1, weight=1)
+
+        self._sv_imu_acc  = tk.StringVar(value="—")
+        self._sv_imu_gyro = tk.StringVar(value="—")
+        self._sv_imu_ang  = tk.StringVar(value="—")
+        self._sv_imu_temp = tk.StringVar(value="—")
+        rows = [
+            ("Accel (g)",  self._sv_imu_acc),
+            ("Giro (°/s)", self._sv_imu_gyro),
+            ("Ângulo (°)", self._sv_imu_ang),
+            ("Temp",       self._sv_imu_temp),
+        ]
+        for i, (lbl, sv) in enumerate(rows):
+            ttk.Label(rf, text=lbl, width=10, anchor=E, foreground=C_MUTED,
+                      font=("", 8)).grid(row=i, column=0, sticky=E,
+                                         padx=(0, 6), pady=1)
+            ttk.Label(rf, textvariable=sv, anchor=W,
+                      font=("Courier", 9)).grid(row=i, column=1, sticky=W, pady=1)
+
+    def _build_imu_controls(self, parent: ttk.Frame) -> None:
+        cf = ttk.Labelframe(parent, text="Calibração & Configuração", padding=8,
+                            bootstyle="secondary")
+        cf.grid(row=1, column=0, sticky="ew")
+        for col in range(3):
+            cf.columnconfigure(col, weight=1)
+
+        # Calibration buttons
+        ttk.Button(cf, text="Calibrar acel. (nivelado)",
+                   bootstyle="secondary-outline", padding=(4, 3),
+                   command=self._on_imu_cal_accel).grid(
+            row=0, column=0, columnspan=2, sticky=EW, padx=(0, 3), pady=2)
+        ttk.Button(cf, text="Zerar yaw", bootstyle="secondary-outline",
+                   padding=(4, 3), command=self._on_imu_zero_yaw).grid(
+            row=0, column=2, sticky=EW, pady=2)
+        self._btn_imu_mag = ttk.Button(
+            cf, text="Calib. magnetômetro", bootstyle="secondary-outline",
+            padding=(4, 3), command=self._on_imu_cal_mag)
+        self._btn_imu_mag.grid(row=1, column=0, columnspan=2, sticky=EW,
+                               padx=(0, 3), pady=2)
+        ttk.Button(cf, text="Reset altura", bootstyle="secondary-outline",
+                   padding=(4, 3), command=self._on_imu_height).grid(
+            row=1, column=2, sticky=EW, pady=2)
+
+        ttk.Separator(cf, orient=HORIZONTAL, bootstyle="secondary").grid(
+            row=2, column=0, columnspan=3, sticky=EW, pady=6)
+
+        # Output rate + save/factory
+        ttk.Label(cf, text="Taxa", foreground=C_MUTED, font=("", 8)).grid(
+            row=3, column=0, sticky=E, padx=(0, 4))
+        self._var_imu_rate = tk.StringVar(value=IMU_RATES[0][0])
+        rate_box = ttk.Combobox(cf, textvariable=self._var_imu_rate, width=8,
+                                state="readonly",
+                                values=[r[0] for r in IMU_RATES])
+        rate_box.grid(row=3, column=1, sticky=W)
+        rate_box.bind("<<ComboboxSelected>>", self._on_imu_rate)
+        ttk.Button(cf, text="Salvar", bootstyle="success-outline",
+                   padding=(4, 3), command=self._on_imu_save).grid(
+            row=3, column=2, sticky=EW, pady=2)
+        ttk.Button(cf, text="Padrão de fábrica", bootstyle="danger-outline",
+                   padding=(4, 3), command=self._on_imu_factory).grid(
+            row=4, column=0, columnspan=3, sticky=EW, pady=2)
+
+        ttk.Separator(cf, orient=HORIZONTAL, bootstyle="secondary").grid(
+            row=5, column=0, columnspan=3, sticky=EW, pady=6)
+
+        # Connection
+        conn = ttk.Frame(cf)
+        conn.grid(row=6, column=0, columnspan=3, sticky=EW)
+        ttk.Label(conn, text="Porta", foreground=C_MUTED, font=("", 8)).pack(
+            side=LEFT, padx=(0, 4))
+        self._var_imu_port = tk.StringVar(value=self._imu_init_port)
+        ttk.Entry(conn, textvariable=self._var_imu_port, width=12,
+                  font=("Courier", 9)).pack(side=LEFT, padx=(0, 6))
+        ttk.Label(conn, text="Baud", foreground=C_MUTED, font=("", 8)).pack(
+            side=LEFT, padx=(0, 4))
+        self._var_imu_baud = tk.StringVar(value=str(self._imu_init_baud))
+        ttk.Entry(conn, textvariable=self._var_imu_baud, width=7,
+                  font=("Courier", 9)).pack(side=LEFT, padx=(0, 8))
+        self._btn_imu_start = ttk.Button(
+            conn, text="Iniciar", bootstyle="success", padding=(8, 3),
+            command=self._on_imu_start)
+        self._btn_imu_start.pack(side=LEFT, padx=(0, 4))
+        self._btn_imu_stop = ttk.Button(
+            conn, text="Parar", bootstyle="secondary", padding=(8, 3),
+            state=DISABLED, command=self._on_imu_stop)
+        self._btn_imu_stop.pack(side=LEFT)
+
+        status_row = ttk.Frame(cf)
+        status_row.grid(row=7, column=0, columnspan=3, sticky=W, pady=(6, 0))
+        ttk.Label(status_row, text="status:", foreground=C_MUTED,
+                  font=("", 8)).pack(side=LEFT, padx=(0, 6))
+        self._sv_imu_status = tk.StringVar(value="parado")
+        self._lbl_imu_status = ttk.Label(
+            status_row, textvariable=self._sv_imu_status,
+            font=("", 9, "bold"), bootstyle="secondary")
+        self._lbl_imu_status.pack(side=LEFT)
+
+    # ── IMU render / display ──────────────────────────────────────────────────
+
+    def _update_imu_display(self) -> None:
+        d = self._imu
+        self._sv_imu_acc.set(
+            f"{d.get('ax', 0.0):+6.2f} {d.get('ay', 0.0):+6.2f} {d.get('az', 0.0):+6.2f}")
+        self._sv_imu_gyro.set(
+            f"{d.get('wx', 0.0):+7.1f} {d.get('wy', 0.0):+7.1f} {d.get('wz', 0.0):+7.1f}")
+        self._sv_imu_ang.set(
+            f"{d.get('roll', 0.0):+6.1f} {d.get('pitch', 0.0):+6.1f} {d.get('yaw', 0.0):+6.1f}")
+        self._sv_imu_temp.set(f"{d.get('temp', 0.0):.1f} °C")
+        self._draw_imu_attitude(
+            d.get("roll", 0.0), d.get("pitch", 0.0), d.get("yaw", 0.0))
+
+    def _draw_imu_attitude(self, roll: float, pitch: float, yaw: float) -> None:
+        cx = cy = IMU_CANVAS / 2
+        rr  = math.radians(roll)
+        off = max(-cy, min(cy, pitch * 2.0))   # px, clamped to canvas
+        dx, dy = math.cos(rr), math.sin(rr)
+        px, py = -math.sin(rr) * off, math.cos(rr) * off
+        self._imu_canvas.coords(
+            self._imu_horizon,
+            cx - dx * IMU_CANVAS + px, cy - dy * IMU_CANVAS + py,
+            cx + dx * IMU_CANVAS + px, cy + dy * IMU_CANVAS + py)
+        self._imu_canvas.itemconfigure(self._imu_yaw_txt, text=f"yaw {yaw:+.0f}°")
+
+    # ── IMU command helpers ───────────────────────────────────────────────────
+
+    def _imu_write(self, *frames: bytes) -> bool:
+        with self._imu_write_lock:
+            if self._imu_conn is None:
+                self._sv_imu_status.set("não conectado")
+                return False
+            try:
+                for f in frames:
+                    self._imu_conn.write(bytes(f))
+                    time.sleep(0.01)
+                self._imu_conn.flush()
+                return True
+            except Exception as exc:
+                self._sv_imu_status.set(f"erro write: {exc}")
+                return False
+
+    def _imu_cmd(self, addr: int, lo: int, hi: int = 0x00,
+                 save: bool = False) -> bool:
+        frames = [IMU_UNLOCK, bytes([0xFF, 0xAA, addr, lo, hi])]
+        if save:
+            frames.append(IMU_SAVE)
+        return self._imu_write(*frames)
+
+    def _update_imu_buttons(self) -> None:
+        self._btn_imu_start.configure(
+            state=DISABLED if self._imu_running else NORMAL)
+        self._btn_imu_stop.configure(
+            state=NORMAL if self._imu_running else DISABLED)
+
+    # ── IMU handlers ──────────────────────────────────────────────────────────
+
+    def _on_imu_cal_accel(self) -> None:
+        if self._imu_cmd(IMU_REG_CALSW, IMU_CAL_ACCEL):
+            self._sv_imu_status.set("calibrando accel — nivelado e parado…")
+            self.root.after(3000, self._finish_imu_accel)
+
+    def _finish_imu_accel(self) -> None:
+        if self._imu_cmd(IMU_REG_CALSW, IMU_CAL_NORMAL, save=True):
+            self._sv_imu_status.set("acelerômetro calibrado e salvo")
+
+    def _on_imu_cal_mag(self) -> None:
+        if not self._imu_mag_calibrating:
+            if self._imu_cmd(IMU_REG_CALSW, IMU_CAL_MAG):
+                self._imu_mag_calibrating = True
+                self._btn_imu_mag.configure(text="Concluir mag.",
+                                            bootstyle="warning")
+                self._sv_imu_status.set("calib. mag — gire em todas as direções…")
+        else:
+            self._imu_cmd(IMU_REG_CALSW, IMU_CAL_NORMAL, save=True)
+            self._imu_mag_calibrating = False
+            self._btn_imu_mag.configure(text="Calib. magnetômetro",
+                                        bootstyle="secondary-outline")
+            self._sv_imu_status.set("magnetômetro calibrado e salvo")
+
+    def _on_imu_zero_yaw(self) -> None:
+        if self._imu_cmd(IMU_REG_CALSW, IMU_CAL_YAW, save=True):
+            self._sv_imu_status.set("yaw zerado")
+
+    def _on_imu_height(self) -> None:
+        if self._imu_cmd(IMU_REG_CALSW, IMU_CAL_HEIGHT, save=True):
+            self._sv_imu_status.set("altura zerada")
+
+    def _on_imu_rate(self, _event: Any = None) -> None:
+        value = dict(IMU_RATES).get(self._var_imu_rate.get())
+        if value is not None and self._imu_cmd(IMU_REG_RRATE, value, save=True):
+            self._sv_imu_status.set(f"taxa → {self._var_imu_rate.get()}")
+
+    def _on_imu_save(self) -> None:
+        if self._imu_write(IMU_UNLOCK, IMU_SAVE):
+            self._sv_imu_status.set("config salva")
+
+    def _on_imu_factory(self) -> None:
+        # Factory reset = SAVE register written with value 0x0001.
+        if self._imu_write(IMU_UNLOCK, bytes([0xFF, 0xAA, IMU_REG_SAVE, 0x01, 0x00])):
+            self._sv_imu_status.set("padrão de fábrica restaurado")
+
+    def _on_imu_start(self) -> None:
+        if self._imu_running:
+            return
+        port = self._var_imu_port.get().strip() or IMU_DEFAULT_PORT
+        try:
+            baud = int(self._var_imu_baud.get())
+        except ValueError:
+            baud = IMU_DEFAULT_BAUD
+        self._imu_stop = threading.Event()
+        self._imu_thread = threading.Thread(
+            target=imu_reader, args=(port, baud, self.event_queue, self._imu_stop),
+            name="imu-reader", daemon=True)
+        self._imu_running = True
+        self._sv_imu_status.set("conectando…")
+        self._lbl_imu_status.configure(bootstyle="info")
+        self._update_imu_buttons()
+        self._imu_thread.start()
+
+    def _on_imu_stop(self) -> None:
+        if self._imu_stop is not None:
+            self._imu_stop.set()
+        self._sv_imu_status.set("parando…")
+        self._lbl_imu_status.configure(bootstyle="secondary")
+
     # ── Safety panel ──────────────────────────────────────────────────────────
 
     def _build_safety_panel(self, parent: ttk.Frame) -> None:
         safety = ttk.Labelframe(parent, text="Safety", padding=10,
                                 bootstyle="warning")
-        safety.grid(row=4, column=0, columnspan=3, sticky=EW, pady=(4, 0))
+        safety.grid(row=5, column=0, columnspan=3, sticky=EW, pady=(4, 0))
         ttk.Label(
             safety,
             text="⚠  Ao ARMAR, o joystick físico move as rodas. Mantenha a "
@@ -1033,6 +1448,26 @@ class WheelchairControlGUI:
                 if not self._sv_lidar_status.get().startswith("erro:"):
                     self._sv_lidar_status.set("parado")
                     self._lbl_lidar_status.configure(bootstyle="secondary")
+            elif kind == "imu_conn_ready":
+                self._imu_conn = payload
+            elif kind == "imu_conn_gone":
+                self._imu_conn = None
+            elif kind == "imu_data":
+                self._imu = payload
+                self._imu_dirty = True
+            elif kind == "imu_status":
+                self._sv_imu_status.set(str(payload))
+                self._lbl_imu_status.configure(bootstyle="success")
+            elif kind == "imu_error":
+                self._sv_imu_status.set(f"erro: {payload}")
+                self._lbl_imu_status.configure(bootstyle="danger")
+            elif kind == "imu_stopped":
+                self._imu_running = False
+                self._imu_conn = None
+                self._update_imu_buttons()
+                if not self._sv_imu_status.get().startswith("erro:"):
+                    self._sv_imu_status.set("parado")
+                    self._lbl_imu_status.configure(bootstyle="secondary")
 
     def _handle_packet(self, pkt: Dict[str, Any]) -> None:
         self.valid_packets += 1
@@ -1114,6 +1549,11 @@ class WheelchairControlGUI:
         if self._lidar_dirty:
             self._render_lidar()
             self._lidar_dirty = False
+
+        # IMU — refresh readings/attitude when fresh data arrived
+        if self._imu_dirty:
+            self._update_imu_display()
+            self._imu_dirty = False
 
         if not self.closing:
             self.root.after(self.gui_update_ms, self._gui_frame)
@@ -1412,13 +1852,17 @@ class WheelchairControlGUI:
         self.stop_event.set()
         if self._lidar_stop is not None:
             self._lidar_stop.set()
+        if self._imu_stop is not None:
+            self._imu_stop.set()
         self._sv_conn.set("closing…")
         self._wait_for_reader()
 
     def _wait_for_reader(self) -> None:
         lidar_alive = (self._lidar_thread is not None
                        and self._lidar_thread.is_alive())
-        if self.reader_thread.is_alive() or lidar_alive:
+        imu_alive = (self._imu_thread is not None
+                     and self._imu_thread.is_alive())
+        if self.reader_thread.is_alive() or lidar_alive or imu_alive:
             self.root.after(50, self._wait_for_reader)
             return
         self.root.destroy()
@@ -1460,7 +1904,9 @@ def main() -> int:
         gui_update_ms=args.gui_update_ms,
         esp_port=args.port,
         lidar_port=args.lidar,
-        lidar_topic=args.lidar_topic)
+        lidar_topic=args.lidar_topic,
+        imu_port=args.imu,
+        imu_baud=args.imu_baud)
     if args.port:
         reader.start()
     root.mainloop()
