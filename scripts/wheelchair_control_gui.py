@@ -239,6 +239,11 @@ POSE_PATH_STEP = 0.02           # m — min move before adding a path point
 POSE_MIN_SPAN  = 1.0            # m — minimum map span (avoid over-zoom)
 POSE_MARGIN    = 0.12           # auto-fit margin (fraction of canvas)
 
+# LIDAR pose (slam_toolbox) read from TF; falls back to IMU dead-reckoning.
+POSE_MAP_FRAME    = "map"
+POSE_BASE_FRAME   = "base_link"
+POSE_LIDAR_TIMEOUT = 1.0        # s — LIDAR pose is "fresh" within this window
+
 C_POSE_PATH   = "#89b4fa"
 C_POSE_CHAIR  = "#a6e3a1"
 C_POSE_ORIGIN = "#6c7086"
@@ -384,6 +389,7 @@ def lidar_ros_reader(
         import rclpy
         from rclpy.qos import qos_profile_sensor_data
         from sensor_msgs.msg import LaserScan
+        from tf2_ros import Buffer, TransformListener
     except Exception as exc:  # noqa: BLE001 — surface any ROS import failure
         event_queue.put((
             "lidar_error",
@@ -406,6 +412,13 @@ def lidar_ros_reader(
             LaserScan, topic,
             lambda m: event_queue.put(("lidar_scan", laserscan_to_points(m))),
             qos_profile_sensor_data)
+
+        # TF listener for the drift-corrected pose (map -> base_link, from
+        # slam_toolbox + EKF). Present only when the full bringup is running;
+        # absent → the GUI falls back to IMU dead-reckoning.
+        tf_buffer = Buffer()
+        TransformListener(tf_buffer, node)
+        last_pose_t = 0.0
 
         # Reuse an already-running driver if one is publishing; only launch our
         # own otherwise (avoids a second node fighting for the serial port).
@@ -430,6 +443,21 @@ def lidar_ros_reader(
                 event_queue.put(("lidar_error", "driver sllidar terminou (porta ocupada?)"))
                 break
             rclpy.spin_once(node, timeout_sec=0.1)
+
+            # Poll map -> base_link ~10 Hz; emit (x, y, yaw) when available.
+            now = time.monotonic()
+            if now - last_pose_t > 0.1:
+                last_pose_t = now
+                try:
+                    tr = tf_buffer.lookup_transform(
+                        POSE_MAP_FRAME, POSE_BASE_FRAME, rclpy.time.Time())
+                    t = tr.transform.translation
+                    q = tr.transform.rotation
+                    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                     1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+                    event_queue.put(("odom_pose", (t.x, t.y, yaw)))
+                except Exception:
+                    pass   # TF not available yet (bringup/slam not up)
     except Exception as exc:  # noqa: BLE001
         event_queue.put(("lidar_error", str(exc)))
     finally:
@@ -666,6 +694,8 @@ class WheelchairControlGUI:
         self._pose_path: "deque[Tuple[float, float]]" = deque(maxlen=POSE_PATH_MAX)
         self._pose_dirty = False
         self._pose_last_draw = 0.0
+        self._pose_lidar_t = 0.0       # monotonic time of last LIDAR pose
+        self._pose_src = "IMU"         # "LIDAR" when slam_toolbox pose is fresh
 
         self._build_ui()
         if self.esp_port is None:
@@ -1527,23 +1557,32 @@ class WheelchairControlGUI:
         self._vel_hist_w.append(wz)
         self._vel_dirty = True
 
-        # Pose dead-reckoning: heading from IMU yaw, translate by v along heading.
+        # Pose: the LIDAR (slam_toolbox) pose is authoritative while fresh;
+        # otherwise dead-reckon from IMU yaw + integrated velocity.
+        if time.monotonic() - self._pose_lidar_t < POSE_LIDAR_TIMEOUT:
+            return
+        self._pose_src = "IMU"
         yaw = imu.get("yaw")
         if yaw is not None:
             if self._pose_yaw0 is None:
                 self._pose_yaw0 = yaw
             self._pose_theta = math.radians(yaw - self._pose_yaw0)
         th = self._pose_theta
-        dx = self._vel_v * math.cos(th) * dt
-        dy = self._vel_v * math.sin(th) * dt
-        self._pose_x += dx
-        self._pose_y += dy
-        self._pose_dist += math.hypot(dx, dy)
-        if (not self._pose_path or
-                math.hypot(self._pose_x - self._pose_path[-1][0],
-                           self._pose_y - self._pose_path[-1][1]) > POSE_PATH_STEP):
-            self._pose_path.append((self._pose_x, self._pose_y))
+        self._pose_x += self._vel_v * math.cos(th) * dt
+        self._pose_y += self._vel_v * math.sin(th) * dt
+        self._pose_push(self._pose_x, self._pose_y)
+
+    def _pose_push(self, x: float, y: float) -> None:
+        """Append a decimated path point and accumulate distance (ignoring big
+        jumps from a source switch / SLAM relocalisation)."""
         self._pose_dirty = True
+        if self._pose_path:
+            d = math.hypot(x - self._pose_path[-1][0], y - self._pose_path[-1][1])
+            if d <= POSE_PATH_STEP:
+                return
+            if d < 1.0:
+                self._pose_dist += d
+        self._pose_path.append((x, y))
 
     def _open_velocity_window(self) -> None:
         if self._vel_win is not None and self._vel_win.winfo_exists():
@@ -1709,9 +1748,10 @@ class WheelchairControlGUI:
 
         ttk.Label(
             frm,
-            text="⚠  Pose por dead-reckoning (yaw do IMU + ∫velocidade). Deriva "
-                 "com o tempo; o triângulo verde é a cadeira apontando o sentido. "
-                 "Use 'Zerar pose' no ponto de partida.",
+            text="Fonte: LIDAR (slam_toolbox, pose corrigida no frame map) quando "
+                 "o bringup está rodando; senão cai para dead-reckoning do IMU "
+                 "(deriva). O triângulo verde é a cadeira apontando o sentido. "
+                 "'Zerar pose' reinicia o traçado do IMU no ponto de partida.",
             foreground=C_MUTED, font=("", 8), wraplength=POSE_PLOT,
             justify=LEFT).pack(fill=X, pady=(8, 0))
 
@@ -1758,12 +1798,13 @@ class WheelchairControlGUI:
             bx + 0.5 * s * pcx, by + 0.5 * s * pcy,
             bx - 0.5 * s * pcx, by - 0.5 * s * pcy)
 
+        src = "LIDAR (slam)" if self._pose_src == "LIDAR" else "IMU (deriva)"
         c.itemconfigure(self._pose_scale_txt,
-                        text=f"{scale:.0f} px/m · perc. {self._pose_dist:.2f} m")
+                        text=f"{scale:.0f} px/m · fonte: {src}")
         self._sv_pose.set(
             f"x {self._pose_x:+.2f}  y {self._pose_y:+.2f} m   "
             f"θ {math.degrees(self._pose_theta):+.0f}°   "
-            f"dist {self._pose_dist:.2f} m")
+            f"dist {self._pose_dist:.2f} m   [{src}]")
 
     def _on_pose_reset(self) -> None:
         self._pose_x = 0.0
@@ -1831,6 +1872,12 @@ class WheelchairControlGUI:
                 if not self._sv_lidar_status.get().startswith("erro:"):
                     self._sv_lidar_status.set("parado")
                     self._lbl_lidar_status.configure(bootstyle="secondary")
+            elif kind == "odom_pose":
+                x, y, yaw = payload
+                self._pose_x, self._pose_y, self._pose_theta = x, y, yaw
+                self._pose_lidar_t = time.monotonic()
+                self._pose_src = "LIDAR"
+                self._pose_push(x, y)
             elif kind == "imu_conn_ready":
                 self._imu_conn = payload
             elif kind == "imu_conn_gone":
