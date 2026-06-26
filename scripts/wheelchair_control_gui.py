@@ -137,8 +137,8 @@ C_LIDAR_FRONT   = "#a6e3a1"
 # configured by writing register commands (0xFF 0xAA addr lo hi) wrapped by an
 # unlock + save sequence. Connecting it straight to the Pi keeps config simple.
 
-IMU_DEFAULT_PORT = "/dev/ttyUSB2"
-IMU_DEFAULT_BAUD = 9600          # Witmotion TTL default (newer units: 115200)
+IMU_DEFAULT_PORT = "/dev/ttyACM0"  # Witmotion 603T = Nations N32L40x USB-CDC
+IMU_DEFAULT_BAUD = 9600            # confirmed on the 603T (frames align at 9600)
 
 IMU_FRAME_LEN = 11
 IMU_HEADER    = 0x55
