@@ -61,6 +61,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -156,6 +157,14 @@ LIDAR_RINGS = (0.25, 0.5, 0.75, 1.0)   # grid rings as fraction of max range
 
 LIDAR_DANGER_M = 0.5    # sector distance ≤ this → red
 LIDAR_WARN_M   = 1.0    # sector distance ≤ this → orange
+
+# ── Parada automática (modula o max_duty pelo obstáculo no cone frontal) ───────
+# A GUI já manda drive_cfg(max_duty) a 10 Hz; aqui derrubamos esse max_duty
+# conforme a folga à frente: zona vermelha → 0 (para), amarela → reduz linear.
+SAFETY_STOP_M_DEFAULT = 0.60   # obstáculo ≤ isto à frente → para (max_duty 0)
+SAFETY_SLOW_M_DEFAULT = 1.10   # entre stop e slow → reduz max_duty proporcional
+SAFETY_FRONT_HALF_DEG = 30.0   # meia-abertura do cone frontal vigiado (± graus)
+SAFETY_MIN_OBSTACLE_M = 0.15   # ignora retornos mais perto que isto (estrutura)
 
 C_LIDAR_POINT   = "#89b4fa"
 C_LIDAR_NEAREST = "#f38ba8"
@@ -306,6 +315,18 @@ def clamp_unit_circle(x: float, y: float) -> Tuple[float, float]:
     return (x / r, y / r) if r > 1.0 else (x, y)
 
 
+def put_drop(event_queue: "queue.Queue", item: Tuple[str, Any]) -> None:
+    """Enfileira sem bloquear; descarta se a fila estiver cheia.
+
+    Usado para eventos de alto volume (scan/IMU/pose) onde só o mais recente
+    importa. Evita que, se o consumidor (GUI) atrasar, as threads produtoras
+    empilhem indefinidamente e estourem a memória da Raspberry."""
+    try:
+        event_queue.put_nowait(item)
+    except queue.Full:
+        pass
+
+
 def duty_label(value: float) -> str:
     if value == 0.0:
         return "Stopped"
@@ -388,7 +409,7 @@ def lidar_ros_reader(
     try:
         import rclpy
         from rclpy.qos import qos_profile_sensor_data
-        from sensor_msgs.msg import LaserScan
+        from sensor_msgs.msg import LaserScan, Imu
         from tf2_ros import Buffer, TransformListener
     except Exception as exc:  # noqa: BLE001 — surface any ROS import failure
         event_queue.put((
@@ -410,8 +431,31 @@ def lidar_ros_reader(
         node = rclpy.create_node("wheelchair_lidar_gui")
         node.create_subscription(
             LaserScan, topic,
-            lambda m: event_queue.put(("lidar_scan", laserscan_to_points(m))),
+            lambda m: put_drop(event_queue, ("lidar_scan", laserscan_to_points(m))),
             qos_profile_sensor_data)
+
+        # Subscribe to /imu_data from witmotion_ros (published by bringup)
+        def _on_imu(msg: Imu) -> None:
+            import math as _math
+            # Convert ROS Imu msg to dict format expected by GUI
+            imu_dict = {
+                "ax": msg.linear_acceleration.x,
+                "ay": msg.linear_acceleration.y,
+                "az": msg.linear_acceleration.z,
+                "wx": _math.degrees(msg.angular_velocity.x),
+                "wy": _math.degrees(msg.angular_velocity.y),
+                "wz": _math.degrees(msg.angular_velocity.z),
+            }
+            # Convert quaternion to yaw angle (degrees)
+            q = msg.orientation
+            yaw_rad = _math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            imu_dict["yaw"] = _math.degrees(yaw_rad)
+            put_drop(event_queue, ("imu_data", imu_dict))
+
+        node.create_subscription(
+            Imu, "/imu_data", _on_imu, qos_profile_sensor_data)
 
         # TF listener for the drift-corrected pose (map -> base_link, from
         # slam_toolbox + EKF). Present only when the full bringup is running;
@@ -455,7 +499,7 @@ def lidar_ros_reader(
                     q = tr.transform.rotation
                     yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-                    event_queue.put(("odom_pose", (t.x, t.y, yaw)))
+                    put_drop(event_queue, ("odom_pose", (t.x, t.y, yaw)))
                 except Exception:
                     pass   # TF not available yet (bringup/slam not up)
     except Exception as exc:  # noqa: BLE001
@@ -575,7 +619,7 @@ def imu_reader(
                 del buf[:-IMU_FRAME_LEN]
             now = time.monotonic()
             if state and now - last_emit > 0.05:
-                event_queue.put(("imu_data", dict(state)))
+                put_drop(event_queue, ("imu_data", dict(state)))
                 last_emit = now
     finally:
         try:
@@ -660,6 +704,13 @@ class WheelchairControlGUI:
         self._lidar_init_port    = lidar_port or LIDAR_DEFAULT_PORT
         self._lidar_init_topic   = lidar_topic or LIDAR_DEFAULT_TOPIC
 
+        # Parada automática por LIDAR (limita max_duty no keep-alive drive_cfg)
+        self._safety_enabled     = False
+        self._safety_stop_m      = SAFETY_STOP_M_DEFAULT
+        self._safety_slow_m      = SAFETY_SLOW_M_DEFAULT
+        self._safety_front_clear = math.inf
+        self._safety_zone        = "off"   # off | clear | slow | stop
+
         # IMU pipeline (Witmotion over USB-TTL — own thread; GUI writes config)
         self._imu_thread: Optional[threading.Thread] = None
         self._imu_stop:   Optional[threading.Event]  = None
@@ -676,6 +727,7 @@ class WheelchairControlGUI:
         self._vel_v   = 0.0           # integrated linear velocity [m/s]
         self._vel_wz  = 0.0           # angular velocity (z gyro) [°/s]
         self._vel_ay_bias = 0.0       # forward-accel bias [g] captured by tare
+        self._vel_tared = False       # auto-tare on first IMU sample
         self._vel_last_t: Optional[float] = None
         self._vel_zupt = True
         self._vel_still_since: Optional[float] = None
@@ -1142,6 +1194,26 @@ class WheelchairControlGUI:
             ttk.Label(health, textvariable=sv, foreground=C_MUTED,
                       font=("Courier", 8)).pack(side=LEFT, padx=(0, 12))
 
+        # Parada automática — limita o max_duty pelo obstáculo no cone frontal.
+        sf = ttk.Frame(mf)
+        sf.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        sf.columnconfigure(0, weight=1)
+        self._var_safety = tk.BooleanVar(value=self._safety_enabled)
+        ttk.Checkbutton(
+            sf, text="Parada automática (LIDAR)", variable=self._var_safety,
+            command=self._on_safety_toggle, bootstyle="round-toggle").grid(
+            row=0, column=0, sticky=W)
+        ttk.Label(
+            sf, text=f"para ≤ {SAFETY_STOP_M_DEFAULT:.2f} m · reduz ≤ "
+                     f"{SAFETY_SLOW_M_DEFAULT:.2f} m · cone ±"
+                     f"{SAFETY_FRONT_HALF_DEG:.0f}°",
+            foreground=C_MUTED, font=("", 8)).grid(row=1, column=0, sticky=W)
+        self._sv_safety  = tk.StringVar(value="desligada")
+        self._lbl_safety = ttk.Label(
+            sf, textvariable=self._sv_safety, font=("Courier", 12, "bold"),
+            bootstyle="secondary")
+        self._lbl_safety.grid(row=2, column=0, sticky=W, pady=(2, 0))
+
     def _build_lidar_controls(self, parent: ttk.Frame) -> None:
         cf = ttk.Labelframe(parent, text="Calibração", padding=8,
                             bootstyle="secondary")
@@ -1526,6 +1598,12 @@ class WheelchairControlGUI:
         """Integrate forward accel → linear velocity; take z gyro as ω. Runs on
         every imu_data sample with real wall-clock dt (drift-bounded via leak +
         ZUPT)."""
+        # Auto-tare on first sample (captures static bias)
+        if not self._vel_tared:
+            self._vel_ay_bias = imu.get("ay", 0.0)
+            self._vel_tared = True
+            return
+
         now = time.monotonic()
         if self._vel_last_t is None:
             self._vel_last_t = now
@@ -1922,6 +2000,19 @@ class WheelchairControlGUI:
     # ── GUI frame ─────────────────────────────────────────────────────────────
 
     def _gui_frame(self) -> None:
+        # Loop de render auto-resiliente. O reschedule TEM de acontecer mesmo
+        # que um redraw lance exceção: senão a fila de eventos para de ser
+        # drenada e as threads do LIDAR/IMU empilham para sempre, estourando a
+        # memória e travando a Raspberry. Um erro transitório só é logado.
+        try:
+            self._gui_frame_body()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            if not self.closing:
+                self.root.after(self.gui_update_ms, self._gui_frame)
+
+    def _gui_frame_body(self) -> None:
         self._process_queue()
 
         # Joystick visualiser
@@ -1970,9 +2061,6 @@ class WheelchairControlGUI:
                 self._pose_last_draw = now
                 self._draw_pose()
 
-        if not self.closing:
-            self.root.after(self.gui_update_ms, self._gui_frame)
-
     def _move_dot(self, x: float, y: float) -> None:
         xd, yd  = clamp_unit_circle(x, y)
         center  = CANVAS_SIZE / 2
@@ -2017,6 +2105,7 @@ class WheelchairControlGUI:
                                   if self._lidar_running else "— Hz")
             for key in self._sv_lidar_sector:
                 self._apply_lidar_sector(key, math.inf)
+            self._update_safety(None)
             return
 
         cx     = cy = LIDAR_CANVAS / 2
@@ -2089,6 +2178,7 @@ class WheelchairControlGUI:
 
         for key, d in sector.items():
             self._apply_lidar_sector(key, d)
+        self._update_safety(scan)
 
         self._sv_lidar_hz.set(f"{self._lidar_hz:.1f} Hz")
         self._sv_lidar_pts.set(f"{n} pts")
@@ -2109,6 +2199,93 @@ class WheelchairControlGUI:
         else:
             sv.set(f"{d:.2f}")
             lbl.configure(bootstyle="success")
+
+    # ── Parada automática por LIDAR ───────────────────────────────────────────
+
+    def _front_clearance(self, scan: Optional[list]) -> float:
+        """Menor distância (m) dentro do cone frontal (±SAFETY_FRONT_HALF_DEG),
+        ignorando retornos a menos de SAFETY_MIN_OBSTACLE_M (estrutura/ruído).
+
+        Usa a mesma transformação de ângulo do desenho (flip + offset), então
+        0° = frente do chassi, igual ao setor "Frente"."""
+        if not scan:
+            return math.inf
+        offset = self._lidar_angle_offset
+        sign   = -1.0 if self._lidar_flip else 1.0
+        q_min  = self._lidar_quality_min
+        best   = math.inf
+        for quality, angle_deg, dist_mm in scan:
+            if quality < q_min:
+                continue
+            d = dist_mm / 1000.0
+            if d < SAFETY_MIN_OBSTACLE_M:
+                continue
+            a  = (angle_deg * sign + offset) % 360.0
+            da = a if a <= 180.0 else 360.0 - a
+            if da <= SAFETY_FRONT_HALF_DEG and d < best:
+                best = d
+        return best
+
+    def _update_safety(self, scan: Optional[list]) -> None:
+        """Recalcula zona/folga frontal e atualiza o rótulo. Define
+        self._safety_zone e self._safety_front_clear, lidos pelo keep-alive
+        drive_cfg em _safety_limited_duty()."""
+        if not hasattr(self, "_lbl_safety"):
+            return
+
+        if not self._safety_enabled:
+            self._safety_zone = "off"
+            self._safety_front_clear = math.inf
+            self._sv_safety.set("desligada")
+            self._lbl_safety.configure(bootstyle="secondary")
+            return
+
+        if not self._lidar_running:
+            self._safety_zone = "off"
+            self._safety_front_clear = math.inf
+            self._sv_safety.set("LIDAR parado — sem proteção")
+            self._lbl_safety.configure(bootstyle="warning")
+            return
+
+        if not scan:
+            # Ligada e LIDAR rodando, mas sem leitura → fail-safe: para.
+            self._safety_zone = "stop"
+            self._safety_front_clear = 0.0
+            self._sv_safety.set("PARADA — sem leitura")
+            self._lbl_safety.configure(bootstyle="danger")
+            return
+
+        clear = self._front_clearance(scan)
+        self._safety_front_clear = clear
+        if clear <= self._safety_stop_m:
+            self._safety_zone = "stop"
+            self._sv_safety.set(f"PARADA   {clear:.2f} m")
+            self._lbl_safety.configure(bootstyle="danger")
+        elif clear <= self._safety_slow_m:
+            self._safety_zone = "slow"
+            self._sv_safety.set(f"REDUZ    {clear:.2f} m")
+            self._lbl_safety.configure(bootstyle="warning")
+        else:
+            self._safety_zone = "clear"
+            txt = "∞" if math.isinf(clear) else f"{clear:.2f} m"
+            self._sv_safety.set(f"LIVRE    {txt}")
+            self._lbl_safety.configure(bootstyle="success")
+
+    def _safety_limited_duty(self) -> float:
+        """max_duty efetivo a enviar no drive_cfg, já limitado pela zona."""
+        base = self._max_duty
+        if not self._safety_enabled or self._safety_zone in ("off", "clear"):
+            return base
+        if self._safety_zone == "stop":
+            return 0.0
+        # slow: reduz linear entre stop (0) e slow (base).
+        span = max(self._safety_slow_m - self._safety_stop_m, 1e-3)
+        frac = (self._safety_front_clear - self._safety_stop_m) / span
+        return round(base * max(0.0, min(1.0, frac)), 3)
+
+    def _on_safety_toggle(self) -> None:
+        self._safety_enabled = bool(self._var_safety.get())
+        self._update_safety(self._lidar_scan)
 
     def _update_lidar_buttons(self) -> None:
         self._btn_lidar_start.configure(
@@ -2168,12 +2345,14 @@ class WheelchairControlGUI:
         self._sv_seq.set(f"seq: {self._seq}")
         return self._send_raw(json.dumps(packet, separators=(",", ":")))
 
-    def _send_drive_cfg(self, armed: bool) -> bool:
+    def _send_drive_cfg(self, armed: bool,
+                        max_duty: Optional[float] = None) -> bool:
+        duty = self._max_duty if max_duty is None else max_duty
         return self._send_command({
             "type": "drive_cfg",
             "accel": round(self._accel, 2),
             "decel": round(self._decel, 2),
-            "max_duty": round(self._max_duty, 3),
+            "max_duty": round(duty, 3),
             "armed": armed,
         })
 
@@ -2183,7 +2362,7 @@ class WheelchairControlGUI:
         if not self._armed or self.closing:
             self._stream_after_id = None
             return
-        if not self._send_drive_cfg(True):
+        if not self._send_drive_cfg(True, self._safety_limited_duty()):
             self._set_armed(False)
             return
         self._stream_after_id = self.root.after(
@@ -2301,7 +2480,9 @@ def main() -> int:
         print(f"Unable to start GUI: {exc}", file=sys.stderr)
         return 1
 
-    event_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
+    # Limite de segurança: se o consumidor (GUI) atrasar, os produtores de alto
+    # volume (put_drop) descartam em vez de empilhar — a Pi não estoura memória.
+    event_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=600)
     stop_event = threading.Event()
 
     if args.port:
