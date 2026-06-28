@@ -24,6 +24,12 @@
  */
 #define DRIVE_CFG_TIMEOUT_MS 400
 
+/*
+ * Host-side semi-assist watchdog.  Once a drive_cmd has been received, stale
+ * assisted commands stop the chair instead of silently falling back to manual.
+ */
+#define DRIVE_CMD_TIMEOUT_MS 200
+
 /* Joystick radial dead-zone (normalised units) to reject centre noise. */
 #define JOYSTICK_DEADZONE    0.08f
 
@@ -121,8 +127,10 @@ void app_main(void)
         }
 
         drive_config_t config = {0};
+        drive_command_t assist = {0};
         if (command_ready) {
             json_command_get_drive_config(&config);
+            json_command_get_drive_command(&assist);
         }
 
         /* Armed only if the operator gate is set AND the config is fresh. */
@@ -130,21 +138,31 @@ void app_main(void)
         const bool driving =
             config.valid && config.armed &&
             (now_ms - config.last_update_ms) < DRIVE_CFG_TIMEOUT_MS;
+        const bool assist_active =
+            assist.valid && (now_ms - assist.last_update_ms) < DRIVE_CMD_TIMEOUT_MS;
 
         if (driving) {
-            float x = sample.x;
-            float y = sample.y;
-            if ((x * x + y * y) < (JOYSTICK_DEADZONE * JOYSTICK_DEADZONE)) {
-                x = 0.0f;
-                y = 0.0f;
-            }
+            float left = 0.0f;
+            float right = 0.0f;
 
-            /* Differential mix: forward = y, turn = x. */
-            float left = y + x;
-            float right = y - x;
-            const float mag = fmaxf(fmaxf(fabsf(left), fabsf(right)), 1.0f);
-            left /= mag;
-            right /= mag;
+            if (assist_active) {
+                left = assist.left;
+                right = assist.right;
+            } else if (!assist.valid) {
+                float x = sample.x;
+                float y = sample.y;
+                if ((x * x + y * y) < (JOYSTICK_DEADZONE * JOYSTICK_DEADZONE)) {
+                    x = 0.0f;
+                    y = 0.0f;
+                }
+
+                /* Differential mix: forward = y, turn = x. */
+                left = y + x;
+                right = y - x;
+                const float mag = fmaxf(fmaxf(fabsf(left), fabsf(right)), 1.0f);
+                left /= mag;
+                right /= mag;
+            }
 
             const float target_left = left * config.max_duty;
             const float target_right = right * config.max_duty;
@@ -172,6 +190,7 @@ void app_main(void)
 
         telemetry_sequence++;
         json_telemetry_send_drive(
-            telemetry_sequence, &sample, &config, driving, cur_left, cur_right);
+            telemetry_sequence, &sample, &config, &assist, assist_active,
+            driving, cur_left, cur_right);
     }
 }

@@ -17,6 +17,8 @@ esp_err_t json_telemetry_send_drive(
     uint32_t sequence,
     const joystick_adc_sample_t *sample,
     const drive_config_t *config,
+    const drive_command_t *assist,
+    bool assist_active,
     bool driving,
     float out_left,
     float out_right);

@@ -21,6 +21,7 @@
 
 static SemaphoreHandle_t state_mutex;
 static drive_config_t drive_config_state;
+static drive_command_t drive_command_state;
 static uint32_t response_sequence;
 
 static uint32_t current_time_ms(void)
@@ -146,6 +147,25 @@ static esp_err_t store_drive_config(
     return ESP_OK;
 }
 
+static esp_err_t store_drive_command(
+    uint32_t host_sequence,
+    float left,
+    float right)
+{
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    drive_command_state.left           = clampf(left,  -1.0f, 1.0f);
+    drive_command_state.right          = clampf(right, -1.0f, 1.0f);
+    drive_command_state.host_seq       = host_sequence;
+    drive_command_state.last_update_ms = current_time_ms();
+    drive_command_state.valid          = true;
+
+    xSemaphoreGive(state_mutex);
+    return ESP_OK;
+}
+
 /* `stop` keeps the tuning but forces the safety gate closed immediately. */
 static esp_err_t store_disarm(uint32_t host_sequence)
 {
@@ -157,6 +177,7 @@ static esp_err_t store_disarm(uint32_t host_sequence)
     drive_config_state.host_seq       = host_sequence;
     drive_config_state.last_update_ms = current_time_ms();
     drive_config_state.valid          = true;
+    drive_command_state               = (drive_command_t){0};
 
     xSemaphoreGive(state_mutex);
     return ESP_OK;
@@ -205,6 +226,25 @@ static void process_command_line(const char *line)
         cJSON_Delete(packet);
         if (store_drive_config(host_sequence, accel, decel, max_duty, armed)
                 != ESP_OK) {
+            send_error("state_update_failed");
+            return;
+        }
+        send_ack(host_sequence);
+        return;
+    }
+
+    if (strcmp(type->valuestring, "drive_cmd") == 0) {
+        float left = 0.0f;
+        float right = 0.0f;
+        const cJSON *l = cJSON_GetObjectItemCaseSensitive(packet, "left");
+        const cJSON *r = cJSON_GetObjectItemCaseSensitive(packet, "right");
+        if (!read_float(l, &left) || !read_float(r, &right)) {
+            cJSON_Delete(packet);
+            send_error("invalid_command");
+            return;
+        }
+        cJSON_Delete(packet);
+        if (store_drive_command(host_sequence, left, right) != ESP_OK) {
             send_error("state_update_failed");
             return;
         }
@@ -264,6 +304,7 @@ esp_err_t json_command_init(void)
     }
 
     drive_config_state = (drive_config_t){0};
+    drive_command_state = (drive_command_t){0};
     response_sequence = 0;
     return ESP_OK;
 }
@@ -300,6 +341,25 @@ esp_err_t json_command_get_drive_config(drive_config_t *config)
     }
 
     *config = drive_config_state;
+    xSemaphoreGive(state_mutex);
+    return ESP_OK;
+}
+
+esp_err_t json_command_get_drive_command(drive_command_t *command)
+{
+    if (command == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (state_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    *command = drive_command_state;
     xSemaphoreGive(state_mutex);
     return ESP_OK;
 }
