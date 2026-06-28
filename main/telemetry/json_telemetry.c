@@ -87,15 +87,17 @@ esp_err_t json_telemetry_send_heartbeat(uint32_t counter)
     return send_json(packet);
 }
 
-esp_err_t json_telemetry_send_joystick(
+esp_err_t json_telemetry_send_drive(
     uint32_t sequence,
     const joystick_adc_sample_t *sample,
-    const motion_command_t *command,
-    const motor_test_command_t *motor_test,
-    const encoder_pcnt_sample_t *encoder,
-    bool encoder_ok)
+    const drive_config_t *config,
+    const drive_command_t *assist,
+    bool assist_active,
+    bool driving,
+    float out_left,
+    float out_right)
 {
-    if (sample == NULL || command == NULL || motor_test == NULL) {
+    if (sample == NULL || config == NULL || assist == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -105,8 +107,17 @@ esp_err_t json_telemetry_send_joystick(
     }
 
     const uint32_t now_ms = current_time_ms();
+    const char *drive_mode = "disarmed";
+    if (driving && assist_active) {
+        drive_mode = "assist";
+    } else if (driving && assist->valid) {
+        drive_mode = "assist_timeout";
+    } else if (driving) {
+        drive_mode = "manual";
+    }
+
     bool packet_complete =
-        cJSON_AddStringToObject(packet, "type", "joy") != NULL &&
+        cJSON_AddStringToObject(packet, "type", "drive") != NULL &&
         cJSON_AddNumberToObject(packet, "seq", sequence) != NULL &&
         cJSON_AddNumberToObject(packet, "t_ms", now_ms) != NULL &&
         cJSON_AddStringToObject(packet, "fw", FIRMWARE_VERSION) != NULL &&
@@ -114,40 +125,41 @@ esp_err_t json_telemetry_send_joystick(
         cJSON_AddNumberToObject(packet, "raw_y", sample->raw_y) != NULL &&
         cJSON_AddNumberToObject(packet, "x", sample->x) != NULL &&
         cJSON_AddNumberToObject(packet, "y", sample->y) != NULL &&
-        cJSON_AddNumberToObject(packet, "cmd_v", command->v_linear) != NULL &&
-        cJSON_AddNumberToObject(packet, "cmd_w", command->w_angular) != NULL &&
-        cJSON_AddNumberToObject(packet, "cmd_seq", command->host_seq) != NULL &&
-        cJSON_AddBoolToObject(packet, "cmd_valid", command->valid) != NULL &&
-        cJSON_AddNumberToObject(packet, "motor_left", motor_test->valid ? motor_test->left : 0.0f) != NULL &&
-        cJSON_AddNumberToObject(packet, "motor_right", motor_test->valid ? motor_test->right : 0.0f) != NULL &&
-        cJSON_AddBoolToObject(packet, "motor_test_active", motor_test->valid) != NULL &&
+        cJSON_AddNumberToObject(packet, "out_left",  out_left)  != NULL &&
+        cJSON_AddNumberToObject(packet, "out_right", out_right) != NULL &&
+        cJSON_AddBoolToObject(packet, "armed", config->armed) != NULL &&
+        cJSON_AddBoolToObject(packet, "driving", driving) != NULL &&
+        cJSON_AddStringToObject(packet, "drive_mode", drive_mode) != NULL &&
+        cJSON_AddBoolToObject(packet, "assist_active", assist_active) != NULL &&
+        cJSON_AddNumberToObject(packet, "max_duty", config->max_duty) != NULL &&
+        cJSON_AddNumberToObject(packet, "accel", config->accel) != NULL &&
+        cJSON_AddNumberToObject(packet, "decel", config->decel) != NULL &&
         cJSON_AddStringToObject(packet, "status", "ok") != NULL;
 
-    if (command->valid) {
+    if (config->valid) {
         packet_complete =
             packet_complete &&
             cJSON_AddNumberToObject(
                 packet,
-                "last_cmd_age_ms",
-                now_ms - command->last_update_ms) != NULL;
+                "cfg_age_ms",
+                now_ms - config->last_update_ms) != NULL;
     } else {
         packet_complete =
             packet_complete &&
-            cJSON_AddNullToObject(packet, "last_cmd_age_ms") != NULL;
+            cJSON_AddNullToObject(packet, "cfg_age_ms") != NULL;
     }
 
-    if (encoder_ok && encoder != NULL) {
+    if (assist->valid) {
         packet_complete =
             packet_complete &&
-            cJSON_AddNumberToObject(packet, "enc_left_count",  encoder->left_count)  != NULL &&
-            cJSON_AddNumberToObject(packet, "enc_right_count", encoder->right_count) != NULL &&
-            cJSON_AddNumberToObject(packet, "enc_left_delta",  encoder->left_delta)  != NULL &&
-            cJSON_AddNumberToObject(packet, "enc_right_delta", encoder->right_delta) != NULL &&
-            cJSON_AddStringToObject(packet, "enc_status", "ok") != NULL;
+            cJSON_AddNumberToObject(packet, "assist_age_ms",
+                                    now_ms - assist->last_update_ms) != NULL &&
+            cJSON_AddNumberToObject(packet, "assist_left", assist->left) != NULL &&
+            cJSON_AddNumberToObject(packet, "assist_right", assist->right) != NULL;
     } else {
         packet_complete =
             packet_complete &&
-            cJSON_AddStringToObject(packet, "enc_status", "error") != NULL;
+            cJSON_AddNullToObject(packet, "assist_age_ms") != NULL;
     }
 
     if (!packet_complete) {

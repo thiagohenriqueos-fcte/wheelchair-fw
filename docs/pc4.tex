@@ -1,0 +1,613 @@
+% =============================================================================
+%   Sistema Embarcado de Navegação Semi-Assistida para Cadeiras de Rodas
+%   Ponto de Controle 4 (PC4) — Sistemas Operacionais Embarcados — UnB
+%
+%   Compilação:  pdflatex pc4.tex && pdflatex pc4.tex
+%
+%   Auto-contido: bibliografia inline (\bibitem) e diagramas em TikZ.
+%   Para usar figuras externas (fotos, screenshots da GUI/RViz), substitua os
+%   blocos TikZ pelos \includegraphics correspondentes.
+% =============================================================================
+
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{listings}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
+
+% Estilo discreto para trechos curtos de código
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  framesep=3pt,
+  xleftmargin=2pt,
+  xrightmargin=2pt
+}
+
+\begin{document}
+
+\title{Sistema Embarcado de Navegação Semi-Assistida\\
+para Cadeiras de Rodas Motorizadas:\\
+Supervisor de Segurança Semi-Assistido Baseado em LiDAR}
+
+\author{
+\IEEEauthorblockN{Vítor Gonçalves de Andrade Silva — 261025182}
+\IEEEauthorblockA{Faculdade de Ciências e Tecnologia em Engenharia\\
+Engenharia Eletrônica\\
+St. Leste Projeção A Gama Leste, Brasília -- DF, 72444-240\\
+Email: 261025182@aluno.unb.br}
+\and
+\IEEEauthorblockN{Thiago Henrique Oliveira Souza — 180131672}
+\IEEEauthorblockA{Faculdade de Ciências e Tecnologia em Engenharia\\
+Engenharia Eletrônica\\
+St. Leste Projeção A Gama Leste, Brasília -- DF, 72444-240\\
+Email: 180131672@aluno.unb.br}
+}
+
+\maketitle
+
+% =============================================================================
+\begin{abstract}
+Este Ponto de Controle~4 (PC4) consolida a missão central do projeto: a
+implementação efetiva do supervisor de segurança semi-assistido baseado em
+LiDAR, planejado arquiteturalmente no PC3. Foi estendido o protocolo serial
+entre a Raspberry Pi~5 e o microcontrolador, acrescentando um comando de
+condução assistida (\texttt{drive\_cmd}) e um portão de segurança
+(\texttt{drive\_cfg}) com \emph{watchdog} temporizado, de modo que a perda de
+qualquer enlace resulta em parada segura, nunca em movimento inesperado. Sobre
+essa base, o supervisor foi realizado de duas formas complementares: (i)~uma
+camada ROS\,2 (\texttt{wheelchair\_ros}) com um nó de controle compartilhado
+que avalia uma \emph{função custo} sobre direções candidatas obtidas do
+\texttt{/scan}, decidindo entre frear, desviar ou parar; e (ii)~uma versão
+pragmática integrada à interface gráfica de bancada, que modula em tempo real
+o teto de \emph{duty} dos motores conforme a folga frontal, com zonas de
+redução e parada. Adicionalmente, foi diagnosticada a causa-raiz das falhas
+intermitentes do LiDAR observadas no PC3 --- subtensão do barramento USB da
+Raspberry Pi~5 sob pico de corrente --- e corrigido um defeito de exaustão de
+memória que travava o sistema operacional após alguns minutos de operação. Os
+ensaios de bancada validam a parada automática diante de obstáculos e os
+mecanismos de \emph{failsafe}, cumprindo o princípio de que o sistema de alto
+nível pode \emph{frear}, mas nunca \emph{acelerar}.
+\end{abstract}
+
+% =============================================================================
+\section{Introdução}
+
+O projeto desenvolve um sistema de direção semi-assistida para cadeiras de
+rodas motorizadas, voltado a usuários com deficiência motora severa, baixo
+controle de tronco ou ausência de controle motor fino~\cite{fehr2000,branco2018}.
+Comandos acidentais e espasmos no joystick podem produzir acelerações
+repentinas e colisões; a literatura clínica aponta que parcela expressiva dos
+pacientes é considerada inapta ao uso de cadeiras motorizadas justamente pela
+inadequação das interfaces de controle~\cite{fehr2000}. A proposta converte a
+cadeira em um veículo semi-autônomo, dividido em um modelo mestre--escravo: a
+Raspberry Pi~5, sob Ubuntu~24.04 e ROS\,2 Jazzy~\cite{ros2docs}, executa a
+percepção e a assistência de alto nível, enquanto o microcontrolador mantém o
+laço de tempo real do joystick e dos motores~\cite{ogata2010}.
+
+Ao final do PC3, a arquitetura distribuída sobre ROS\,2 estava integrada, o IMU
+publicava a 250\,Hz e o pacote próprio servia de espinha dorsal ao sistema;
+restavam, contudo, três pendências críticas: a indisponibilidade do LiDAR
+durante os testes, a ausência de telemetria útil das rodas e --- sobretudo ---
+a não implementação do supervisor de segurança, então apenas definido em
+princípio. O PC4 ataca diretamente essa lacuna central. Suas contribuições são:
+
+\begin{enumerate}
+\item \textbf{Protocolo de controle assistido}: extensão do firmware com os
+comandos \texttt{drive\_cfg} (portão de segurança: armar/desarmar, teto de
+\emph{duty} e rampas) e \texttt{drive\_cmd} (condução assistida por roda),
+ambos sob \emph{watchdog}, com estados explícitos de operação reportados na
+telemetria.
+
+\item \textbf{Supervisor de segurança por função custo}: nó ROS\,2 que assina
+o \texttt{/scan}, avalia direções candidatas por uma função custo que pondera
+obstáculo e desvio, e decide entre reduzir velocidade, desviar lateralmente ou
+parar o avanço.
+
+\item \textbf{Parada automática de bancada}: implementação direta na interface
+gráfica de controle, que modula o teto de \emph{duty} em função da folga no
+cone frontal, com zonas de redução e parada parametrizáveis, usada para a
+demonstração física.
+
+\item \textbf{Robustez do sistema embarcado}: diagnóstico do problema de
+energia USB da Raspberry Pi~5 (subtensão sob pico de corrente) e correção de um
+defeito de exaustão de memória que travava o sistema operacional, tema
+diretamente associado a temporização e tolerância a falhas.
+\end{enumerate}
+
+% =============================================================================
+\section{Evolução da Arquitetura}
+
+A divisão mestre--escravo do PC3 foi preservada. A novidade do PC4 está no
+\emph{caminho de comando assistido}: além de receber a telemetria do
+microcontrolador, a Raspberry Pi passa a poder \emph{intervir} no movimento de
+forma limitada e auditável. A Fig.~\ref{fig:fluxo} ilustra o fluxo de dados do
+supervisor. O joystick físico permanece como fonte primária de intenção; o
+supervisor só pode \emph{atenuar} ou \emph{bloquear} o avanço, nunca ampliá-lo.
+
+% --- Fluxo de dados do supervisor -------------------------------------------
+\begin{figure*}[!t]
+\centering
+\resizebox{0.92\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\footnotesize,
+  every node/.style={align=center},
+  blk/.style={draw, rounded corners=2pt, minimum height=10mm,
+              minimum width=30mm, inner sep=4pt, fill=gray!6},
+  sens/.style={draw, rounded corners=2pt, minimum height=10mm,
+               minimum width=24mm, inner sep=4pt, fill=gray!14},
+  arr/.style={-Latex, thick},
+  lab/.style={font=\scriptsize, fill=white, inner sep=1pt}
+]
+\node[sens] (esp) at (0,0) {ESP32 / firmware\\joystick + motores};
+\node[blk]  (bridge) at (4.2,0) {\texttt{esp\_bridge}\\(ponte serial)};
+\node[blk]  (shared) at (9.2,0) {\texttt{shared\_control}\\(função custo)};
+\node[sens] (lidar) at (9.2,-2.0) {LiDAR\\\texttt{/scan}};
+
+\draw[arr] (esp.east) -- (bridge.west)
+  node[midway,above,lab] {telemetria};
+\draw[arr] (bridge.east) -- (shared.west)
+  node[midway,above,lab] {\texttt{/joystick\_cmd\_vel}};
+\draw[arr] (lidar.north) -- (shared.south)
+  node[midway,right,lab] {\texttt{/scan}};
+
+% Retorno: cmd_vel -> bridge -> drive_cmd -> esp
+\draw[arr] (shared.north) -- ++(0,0.9) -| (bridge.north)
+  node[pos=0.25,above,lab] {\texttt{/cmd\_vel} (atenuado/desviado)};
+\draw[arr] (bridge.south) -- ++(0,-1.4) -| (esp.south)
+  node[pos=0.25,below,lab] {\texttt{drive\_cfg} + \texttt{drive\_cmd}};
+\end{tikzpicture}%
+}
+\caption{Fluxo de dados do supervisor semi-assistido. A intenção do joystick,
+lida pelo firmware, é republicada pela ponte em \texttt{/joystick\_cmd\_vel}.
+O nó \texttt{shared\_control} combina essa intenção com o \texttt{/scan} e
+publica um \texttt{/cmd\_vel} possivelmente atenuado ou desviado, que a ponte
+converte em \texttt{drive\_cmd} para o firmware. A iniciativa de avanço é
+sempre do usuário; o supervisor apenas freia ou desvia.}
+\label{fig:fluxo}
+\end{figure*}
+
+\subsection{Protocolo de controle assistido e estados de operação}
+
+O firmware passou a aceitar três mensagens JSON sobre a serial USB:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+{"type":"drive_cfg","armed":true,"max_duty":0.20,
+ "accel":1.5,"decel":3.0}
+{"type":"drive_cmd","left":0.0,"right":0.0}
+{"type":"stop"}
+\end{lstlisting}
+
+O \texttt{drive\_cfg} funciona como \emph{portão de segurança}: define se o
+estágio de potência está armado e impõe o teto de \emph{duty} e as rampas de
+aceleração/desaceleração. O \texttt{drive\_cmd} carrega o comando assistido
+normalizado por roda, em $[-1,1]$. O firmware seleciona, a cada ciclo, entre
+três modos de condução, reportados no campo \texttt{drive\_mode} da telemetria
+e ilustrados na Fig.~\ref{fig:estados}:
+
+\begin{itemize}
+\item \textbf{manual}: não há \texttt{drive\_cmd} recente; o firmware aplica a
+mixagem diferencial do joystick físico, saturada pelo teto de \texttt{drive\_cfg};
+\item \textbf{assist}: há \texttt{drive\_cmd} recente; o firmware usa os comandos
+de roda calculados pela Raspberry Pi;
+\item \textbf{assist\_timeout}: havia condução assistida, mas o
+\texttt{drive\_cmd} expirou (perda do nó de controle); o firmware \emph{para},
+sem retornar silenciosamente ao modo manual.
+\end{itemize}
+
+Dois \emph{watchdogs} independentes garantem segurança por temporização: a
+ausência de \texttt{drive\_cfg} fresco desarma o estágio de potência (queda da
+ponte ou do USB), e a expiração do \texttt{drive\_cmd} no estado assistido leva
+à parada. Assim, qualquer falha de comunicação degrada para um estado seguro.
+
+% --- Máquina de estados do firmware -----------------------------------------
+\begin{figure}[!t]
+\centering
+\resizebox{0.95\columnwidth}{!}{%
+\begin{tikzpicture}[
+  font=\footnotesize,
+  node distance=15mm and 18mm,
+  st/.style={draw, rounded corners=2pt, minimum height=9mm,
+             minimum width=22mm, align=center, fill=gray!8},
+  arr/.style={-Latex, thick},
+  lab/.style={font=\scriptsize, fill=white, inner sep=1pt}
+]
+\node[st, fill=gray!18] (dis) {desarmado};
+\node[st, right=of dis]  (man) {manual};
+\node[st, right=of man]  (ass) {assist};
+\node[st, below=of ass, fill=red!12] (to) {assist\_timeout\\(parado)};
+
+\draw[arr] (dis.east) -- (man.west)
+  node[midway,above,lab] {\texttt{drive\_cfg}\\armado};
+\draw[arr] (man.east) -- (ass.west)
+  node[midway,above,lab] {\texttt{drive\_cmd}};
+\draw[arr] (ass.south) -- (to.north)
+  node[midway,right,lab] {\texttt{drive\_cmd}\\expira};
+\draw[arr] (to.west) -- ++(-1.0,0) |- (man.south)
+  node[pos=0.75,below,lab] {novo \texttt{drive\_cmd} / manual};
+\draw[arr] (man.north) -- ++(0,0.9) -| (dis.north)
+  node[pos=0.25,above,lab] {\texttt{stop} / \texttt{drive\_cfg} expira};
+\end{tikzpicture}%
+}
+\caption{Estados de condução do firmware. Perdas de enlace (USB, ponte ou nó de
+controle) levam sempre a estados seguros: desarmado ou parado.}
+\label{fig:estados}
+\end{figure}
+
+\subsection{Supervisor de segurança por função custo}
+
+O nó \texttt{shared\_control} é o núcleo da assistência. A cada ciclo
+($\sim$20\,Hz) ele recebe a intenção do usuário $(v_u,\dot\psi_u)$ e a varredura
+do LiDAR, e avalia um conjunto de direções candidatas
+$\delta \in [-\delta_{\max}, \delta_{\max}]$ em torno da frente. Para cada
+candidata define-se a \emph{folga} $c(\delta)$ como a menor distância medida
+dentro de um cone de meia-abertura $\theta_c$ centrado em $\delta$:
+\begin{equation}
+c(\delta) = \min_{\,|\angle(\theta_i,\delta)| \le \theta_c}\; r_i,
+\end{equation}
+\noindent onde $(r_i,\theta_i)$ são os pares distância/ângulo do \texttt{/scan}.
+O termo de obstáculo penaliza folgas pequenas de forma contínua entre os
+limiares de parada $d_{\text{stop}}$ e de redução $d_{\text{slow}}$:
+\begin{equation}
+g(c) =
+\begin{cases}
+0, & c \ge d_{\text{slow}},\\[2pt]
+\dfrac{d_{\text{slow}} - c}{\,d_{\text{slow}} - d_{\text{stop}}\,}, & d_{\text{stop}} < c < d_{\text{slow}},\\[8pt]
+C_{\text{blk}}, & c \le d_{\text{stop}}.
+\end{cases}
+\end{equation}
+A função custo combina obstáculo e desvio em relação à direção desejada
+$\delta_c = \mathrm{clamp}(\dot\psi_u,-\delta_{\max},\delta_{\max})$:
+\begin{equation}
+J(\delta) = w_o\,g\!\big(c(\delta)\big)
+          + w_d\,\frac{|\delta - \delta_c|}{\delta_{\max}}.
+\end{equation}
+A direção escolhida é $\delta^\star = \arg\min_\delta J(\delta)$. A decisão de
+arbitragem é:
+\begin{itemize}
+\item se \emph{todas} as candidatas estão bloqueadas ($g=C_{\text{blk}}$) ou
+$c(\delta^\star) \le d_{\text{stop}}$: \textbf{parar} o avanço;
+\item caso a frente esteja totalmente livre ($c(0) \ge d_{\text{slow}}$):
+\textbf{nenhuma intervenção};
+\item caso intermediário: reduzir a velocidade pelo fator
+$s\!\big(c(\delta^\star)\big)$ e aplicar uma correção limitada de esterçamento.
+\end{itemize}
+O fator de redução $s(\cdot)$ é linear na faixa $[d_{\text{stop}},d_{\text{slow}}]$,
+e os comandos de saída são
+\begin{align}
+v_{\text{out}}      &= v_u \cdot s\!\big(c(\delta^\star)\big),\\
+\dot\psi_{\text{out}} &= \dot\psi_u + K_{\text{assist}}\,\delta^\star,
+\end{align}
+\noindent com $K_{\text{assist}}$ ajustável (em particular, $K_{\text{assist}}=0$
+desativa o desvio, restando apenas freio/parada --- modo conservador usado nos
+primeiros ensaios). Essa formulação por setores e custo direcional aproxima-se
+da família de métodos de histograma de campo vetorial~\cite{borenstein1991},
+adaptada ao requisito de \emph{preservação da intenção do usuário}.
+
+A ponte \texttt{esp\_bridge} converte $(v_{\text{out}},\dot\psi_{\text{out}})$ em
+comandos normalizados de roda por mixagem diferencial e os transmite como
+\texttt{drive\_cmd}, mantendo o \texttt{drive\_cfg} vivo como portão de
+segurança. Por padrão a ponte nasce \emph{desarmada}: só transmite movimento
+quando explicitamente armada.
+
+\subsection{Zonas de segurança e parada automática de bancada}
+
+Para a demonstração física foi implementada também uma versão direta na
+interface gráfica de controle, sem depender da pilha completa de controle
+ROS\,2. Como o firmware já satura o joystick pelo teto de \texttt{drive\_cfg} e
+a interface já transmite esse teto periodicamente, a parada automática foi
+obtida \emph{modulando o teto de \texttt{max\_duty} em tempo real} conforme a
+folga no cone frontal. A lógica restringe a leitura a um cone de meia-abertura
+$\theta_c=30^\circ$ à frente e ignora retornos a menos de $0{,}15$\,m (estrutura
+da própria cadeira), conforme as zonas da Fig.~\ref{fig:zonas}:
+
+\begin{itemize}
+\item \textbf{zona vermelha} ($c \le 0{,}60$\,m): teto de \emph{duty} forçado a
+zero --- \emph{parada};
+\item \textbf{zona amarela} ($0{,}60 < c \le 1{,}10$\,m): teto reduzido
+linearmente com a folga;
+\item \textbf{livre} ($c > 1{,}10$\,m): teto nominal.
+\end{itemize}
+
+\begin{figure}[!t]
+\centering
+\resizebox{0.82\columnwidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize]
+% Zona amarela (reducao) - cone frontal +-30 graus, raio 1.10 (escala 2.5)
+\fill[orange!50, opacity=0.25] (0,0) -- (60:2.75) arc[start angle=60, end angle=120, radius=2.75] -- cycle;
+% Zona vermelha (parada) - mesmo cone, raio 0.60 (escala 2.5 -> 1.5)
+\fill[red!60, opacity=0.45] (0,0) -- (60:1.5) arc[start angle=60, end angle=120, radius=1.5] -- cycle;
+\draw[orange!70!black, thin] (0,0) -- (60:2.75);
+\draw[orange!70!black, thin] (0,0) -- (120:2.75);
+\draw[orange!70!black, thin] (60:2.75) arc[start angle=60, end angle=120, radius=2.75];
+\draw[red!70!black, thin] (60:1.5) arc[start angle=60, end angle=120, radius=1.5];
+
+% Cadeira e LiDAR
+\filldraw[fill=gray!25, draw=gray!60] (-0.6,-0.7) rectangle (0.6,0.4);
+\node[gray!40!black] at (0,-0.15) {\scriptsize cadeira};
+\fill[gray!70!black] (0,0.4) circle (0.10);
+\node[right=0.5mm of {(0.10,0.4)}, gray!40!black] {\scriptsize LiDAR};
+
+% Cotas
+\node[red!60!black] at (90:1.0) {\scriptsize $0{,}60$\,m};
+\node[orange!60!black] at (90:2.3) {\scriptsize $1{,}10$\,m};
+\node[gray!50!black] at (123:1.9) {\scriptsize $\pm 30^\circ$};
+
+% Obstaculo de exemplo na zona vermelha
+\filldraw[fill=gray!60, draw=gray!80] (0.15,1.2) rectangle (0.5,1.55);
+\draw[gray!50, ->] (1.3,1.4) -- (0.55,1.4) node[midway,above,gray!40!black]
+  {\scriptsize obstáculo};
+
+% Legenda
+\node[anchor=west] at (1.6,0.4) {\scriptsize zona amarela: reduz $v_{\max}$};
+\node[anchor=west] at (1.6,0.0) {\scriptsize zona vermelha: parada};
+\end{tikzpicture}%
+}
+\caption{Zonas implementadas na parada automática de bancada, restritas ao cone
+frontal de $\pm 30^\circ$. A zona amarela atenua o teto de \emph{duty}
+linearmente com a folga; a zona vermelha ($\le 0{,}60$\,m) impõe parada.
+Retornos a menos de $0{,}15$\,m são descartados como estrutura da cadeira.}
+\label{fig:zonas}
+\end{figure}
+
+\subsection{Resiliência: temporização e exaustão de recursos}
+
+A interface de controle concentra três produtores de dados assíncronos (ESP,
+LiDAR e IMU) drenados por um laço de renderização periódico. Verificou-se que o
+reagendamento desse laço ocorria \emph{após} todas as rotinas de desenho;
+qualquer exceção transitória em uma delas interrompia o reagendamento e, por
+consequência, a drenagem da fila de eventos. Como as \emph{threads} produtoras
+seguiam enfileirando (o LiDAR a 10\,Hz, com $\sim$1500 pontos por varredura), a
+memória crescia de forma ilimitada até travar todo o sistema operacional após
+alguns minutos. A correção aplicou dois princípios clássicos de sistemas
+embarcados:
+
+\begin{enumerate}
+\item \textbf{laço auto-resiliente}: o reagendamento passou a ocorrer em
+cláusula \texttt{finally}, de modo que uma falha de desenho é registrada mas
+\emph{nunca} interrompe a drenagem;
+\item \textbf{fila limitada com descarte}: a fila de eventos recebeu teto e os
+produtores de alto volume passaram a descartar amostras antigas quando ela
+satura (apenas a varredura mais recente é útil), eliminando a possibilidade de
+crescimento ilimitado de memória.
+\end{enumerate}
+
+% =============================================================================
+\section{Resultados Experimentais}
+
+Os ensaios do PC4 foram conduzidos no hardware final, em bancada, com as rodas
+suspensas em todos os passos que podem acionar motor. Adotou-se sempre teto
+conservador ($\texttt{max\_duty} \le 0{,}20$) e início sem desvio
+($K_{\text{assist}}=0$).
+
+\subsection{Experimento 1: Energia USB da Raspberry Pi~5 e recuperação do LiDAR}
+
+A indisponibilidade do LiDAR ao final do PC3 foi reinvestigada. O registro do
+\emph{kernel} revelou desconexões e re-enumerações simultâneas de múltiplos
+dispositivos USB --- inclusive do próprio LiDAR --- padrão típico de
+\emph{brownout} do barramento. A Raspberry Pi~5 limita a corrente total das
+portas USB quando não alimentada pela fonte de 27\,W; com o motor do LiDAR e
+os demais conversores seriais drenando corrente, o barramento sofria subtensão
+momentânea, reiniciando os dispositivos. A remoção do IMU do barramento
+estabilizou imediatamente o conjunto, confirmando a hipótese: a ``falha'' do
+PC3 foi, em boa medida, um problema de \emph{energia}, não de sensor. A
+Tabela~\ref{tab:usb} resume o diagnóstico.
+
+\begin{table}[!t]
+\caption{Diagnóstico de estabilidade do barramento USB (Raspberry Pi~5)}
+\label{tab:usb}
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.40\columnwidth}p{0.52\columnwidth}@{}}
+\hline
+\textbf{Observação} & \textbf{Interpretação} \\
+\hline
+Desconexões simultâneas de LiDAR e ESP no log do \emph{kernel} & Subtensão do barramento sob pico de corrente \\
+Conjunto estabiliza ao remover o IMU & Excesso de corrente agregada \\
+Portas \texttt{ttyUSB*} trocam de número entre reinícios & Enumeração não determinística \\
+\hline
+\end{tabular}
+\end{table}
+
+Como mitigação imediata, adotou-se o endereçamento dos dispositivos por
+caminhos estáveis (\emph{symlinks} \texttt{by-id}, equivalentes às regras
+\emph{udev} do PC3), eliminando a dependência da ordem de enumeração, e a
+operação da demonstração sem o IMU, que não é necessário ao supervisor de
+parada. Recomenda-se, para a fase de campo, alimentar o LiDAR por
+\emph{hub} USB com fonte própria. Recuperada a estabilidade, o LiDAR voltou a
+publicar \texttt{/scan} a $\sim$10\,Hz, desbloqueando a percepção.
+
+\subsection{Experimento 2: Telemetria e protocolo de condução assistida}
+
+Com o microcontrolador conectado, a telemetria foi capturada diretamente da
+serial USB a 115\,200\,bps, confirmando a emissão contínua de pacotes
+\texttt{drive} já com os campos do protocolo estendido --- entre eles
+\texttt{max\_duty}, \texttt{accel}, \texttt{decel} e os contadores de idade dos
+comandos (\texttt{cfg\_age\_ms}, \texttt{assist\_age\_ms}). A presença desses
+campos comprova que o firmware em execução implementa o protocolo
+\texttt{drive\_cfg}/\texttt{drive\_cmd}, condição necessária para a condução
+assistida. A ponte serial ROS\,2 abriu a porta, republicou a intenção do
+joystick em \texttt{/joystick\_cmd\_vel} e manteve o \texttt{drive\_cfg}
+periódico, partindo no estado desarmado por padrão.
+
+\subsection{Experimento 3: Parada automática diante de obstáculo}
+
+Validou-se a parada automática de bancada com o LiDAR em operação e o cone
+frontal alinhado à frente da cadeira. A Tabela~\ref{tab:zonas} resume o
+comportamento observado ao aproximar um obstáculo da frente, em concordância
+com a lógica das zonas: parada total na zona vermelha, redução proporcional na
+zona amarela e teto nominal em frente livre. O indicador da interface
+acompanhou as transições \textsc{livre}~$\rightarrow$~\textsc{reduz}~$\rightarrow$~\textsc{parada}
+em tempo real, e o teto de \emph{duty} transmitido ao firmware foi a zero na
+zona vermelha, impedindo o giro das rodas mesmo com o joystick solicitando
+avanço.
+
+\begin{table}[!t]
+\caption{Resposta da parada automática à folga frontal (bancada)}
+\label{tab:zonas}
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.24\columnwidth}p{0.22\columnwidth}p{0.40\columnwidth}@{}}
+\hline
+\textbf{Folga frontal} & \textbf{Zona} & \textbf{Teto de \emph{duty} aplicado} \\
+\hline
+$\le 0{,}60$\,m            & vermelha & $0$ (parada) \\
+$0{,}80$\,m                & amarela  & $\approx 40\%$ do nominal \\
+$> 1{,}10$\,m / só lateral & livre    & nominal \\
+$< 0{,}15$\,m              & ignorada & descartada (estrutura) \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Experimento 4: Mecanismos de \emph{failsafe}}
+
+Os caminhos de degradação segura foram exercitados isoladamente, todos com
+resultado conforme o projetado:
+
+\begin{itemize}
+\item \textbf{Perda de \texttt{/scan}} (LiDAR encerrado com pedido de avanço):
+o controle bloqueia o avanço por ausência de varredura recente;
+\item \textbf{Perda do nó de controle}: a ponte passa a enviar \texttt{stop} e
+o firmware desarma;
+\item \textbf{Perda do enlace USB/ponte}: expirado o \texttt{drive\_cfg}, o
+firmware desarma e zera os motores;
+\item \textbf{\texttt{drive\_cmd} expirado com \texttt{drive\_cfg} ainda
+fresco}: o firmware entra em \texttt{assist\_timeout} e \emph{para}, sem
+retornar sozinho ao modo manual.
+\end{itemize}
+
+\subsection{Experimento 5: Correção do travamento por exaustão de memória}
+
+Reproduziu-se a falha de travamento e confirmou-se sua causa-raiz (interrupção
+do laço de drenagem por exceção transitória, com crescimento ilimitado da fila
+de eventos). Após a aplicação do laço auto-resiliente e da fila limitada com
+descarte, a operação prolongada deixou de degradar: na pior hipótese, a
+interface perde atualizações momentâneas, mas a memória permanece limitada e o
+sistema operacional não trava. O resultado ilustra, na prática, os conceitos de
+temporização determinística e tolerância a falhas centrais à disciplina.
+
+% =============================================================================
+\section{Conclusões}
+
+O PC4 cumpriu a missão central do projeto: implementar e validar o supervisor
+de segurança semi-assistido baseado em LiDAR, antes apenas previsto. O firmware
+ganhou um protocolo de condução assistida com portão de segurança e
+\emph{watchdogs}, garantindo que toda falha de comunicação degrade para parada
+ou desarme. Sobre essa base, o supervisor foi realizado tanto como nó ROS\,2 de
+controle compartilhado por função custo quanto como parada automática direta na
+interface de bancada, ambos respeitando o princípio de que o sistema de alto
+nível pode \emph{frear}, mas nunca \emph{acelerar}. A Tabela~\ref{tab:status}
+resume a situação dos subsistemas.
+
+\begin{table}[!t]
+\caption{Situação dos principais subsistemas ao final do PC4}
+\label{tab:status}
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.24\columnwidth}p{0.24\columnwidth}p{0.40\columnwidth}@{}}
+\hline
+\textbf{Subsistema} & \textbf{Status} & \textbf{Observação} \\
+\hline
+LiDAR / \texttt{/scan}        & Operacional & Recuperado; falha do PC3 atribuída a subtensão USB. \\
+Telemetria do ESP             & Operacional & Protocolo \texttt{drive\_cfg}/\texttt{drive\_cmd} em execução. \\
+Supervisor (função custo)     & Implementado & Nó ROS\,2 \texttt{shared\_control} com freio/desvio/parada. \\
+Parada automática             & Validada     & Em bancada, por modulação do teto de \emph{duty}. \\
+\emph{Failsafes}              & Validados    & \emph{Watchdogs} de \texttt{drive\_cfg} e \texttt{drive\_cmd}. \\
+Energia USB (Pi 5)            & Mitigada     & Endereçamento \texttt{by-id}; \emph{hub} alimentado recomendado. \\
+Robustez da interface         & Corrigida    & Laço resiliente + fila limitada (sem travamento). \\
+Desvio autônomo com motor     & A validar    & Implementado; teste motorizado em campo pendente. \\
+\hline
+\end{tabular}
+\end{table}
+
+Como limitações, o desvio autônomo foi implementado mas ainda não exercitado em
+condução motorizada de campo, e a parada baseada em teto de \emph{duty} inibe
+também a ré nas proximidades do obstáculo (comportamento seguro, porém
+conservador). O bloqueio direcional --- parar apenas o avanço e preservar a ré
+--- requer o uso pleno do \texttt{drive\_cmd} sobrepondo a mixagem do joystick,
+caminho já disponível na camada ROS\,2.
+
+Os próximos passos para a fase final são:
+\begin{enumerate}
+\item realizar o ensaio motorizado de campo do supervisor com a cadeira no solo,
+partindo de teto conservador;
+\item alimentar o LiDAR por \emph{hub} USB com fonte própria, eliminando o risco
+de subtensão sob pico de corrente;
+\item calibrar os limiares $d_{\text{stop}}$, $d_{\text{slow}}$, a abertura do
+cone e o ganho $K_{\text{assist}}$ em função da velocidade máxima da cadeira e
+da latência total;
+\item implementar o bloqueio direcional via \texttt{drive\_cmd}, preservando a
+manobra de recuo;
+\item integrar a pose fundida (\texttt{/odometry/filtered}) ao supervisor para
+referência de movimento mais robusta.
+\end{enumerate}
+
+% =============================================================================
+\begin{thebibliography}{99}
+
+\bibitem{fehr2000}
+L.~Fehr, W.~E. Langbein e S.~B. Skaar, ``Adequacy of power wheelchair
+control interfaces for persons with severe disabilities: A clinical
+survey,'' \emph{Journal of Rehabilitation Research and Development},
+vol.~37, no.~3, pp.~353--360, 2000.
+
+\bibitem{borenstein1991}
+J.~Borenstein e Y.~Koren, ``The Vector Field Histogram --- Fast Obstacle
+Avoidance for Mobile Robots,'' \emph{IEEE Transactions on Robotics and
+Automation}, vol.~7, no.~3, pp.~278--288, 1991.
+
+\bibitem{hossain2022}
+M.~A. Hossain \emph{et~al.}, ``Collision Avoidance for Autonomous
+Wheelchair Using Integrated SLAM and YOLO,'' em \emph{6th International
+Conference on I-SMAC (IoT in Social, Mobile, Analytics and Cloud)}, 2022.
+
+\bibitem{ahmed2021}
+S.~S.~S.~J. Ahmed \emph{et~al.}, ``SLAM Based Indoor Autonomous
+Navigation System For Electric Wheelchair,'' em \emph{2021 International
+Conference on ICICT4SD}, 2021.
+
+\bibitem{ogata2010}
+K.~Ogata, \emph{Engenharia de Controle Moderno}, 5\textsuperscript{a}~ed.
+São Paulo, SP: Pearson Prentice Hall, 2010.
+
+\bibitem{branco2018}
+M.~D.~C.~C. Branco, ``Desenvolvimento de um protótipo de cadeira de rodas
+motorizada controlada por movimentos oculares,'' Trabalho de Conclusão
+de Curso, UFRN, Natal, 2018.
+
+\bibitem{ros2docs}
+Open Robotics, ``Robot Operating System 2 (ROS\,2) Jazzy Jalisco
+Documentation,'' 2024. Disponível em:
+\url{https://docs.ros.org/en/jazzy/}.
+
+\bibitem{robotlocalization}
+T.~Moore e D.~Stouch, ``A Generalized Extended Kalman Filter
+Implementation for the Robot Operating System,'' em \emph{Proceedings of
+the 13th International Conference on Intelligent Autonomous Systems},
+Springer, 2014.
+
+\bibitem{slamtec}
+Slamtec, ``RPLIDAR Low Cost 360 Degree Laser Range Scanner Datasheet,''
+2020.
+
+\bibitem{witmotion}
+WitMotion, ``IWT603 Industrial Grade IMU Product Specifications,'' 2024.
+
+\end{thebibliography}
+
+\end{document}

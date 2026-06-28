@@ -42,7 +42,7 @@ def uint32_value(value: str) -> int:
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Send newline-delimited JSON movement commands to the ESP32-S3 "
+            "Send newline-delimited JSON drive commands to the ESP32-S3 "
             "and print its JSON responses."
         )
     )
@@ -69,9 +69,37 @@ def parse_arguments() -> argparse.Namespace:
         "--raw-line",
         help="Send one literal line, useful for invalid-JSON testing.",
     )
+    command_group.add_argument(
+        "--drive-cfg",
+        action="store_true",
+        help="Send a drive_cfg command with --armed/--max-duty/--accel/--decel.",
+    )
 
-    parser.add_argument("--v", type=float, help="Linear velocity in m/s.")
-    parser.add_argument("--w", type=float, help="Angular velocity in rad/s.")
+    parser.add_argument("--left", type=float, help="drive_cmd left wheel [-1, 1].")
+    parser.add_argument("--right", type=float, help="drive_cmd right wheel [-1, 1].")
+    parser.add_argument(
+        "--armed",
+        action="store_true",
+        help="Use armed=true with --drive-cfg.",
+    )
+    parser.add_argument(
+        "--max-duty",
+        type=float,
+        default=0.30,
+        help="drive_cfg max_duty (default: 0.30).",
+    )
+    parser.add_argument(
+        "--accel",
+        type=float,
+        default=1.5,
+        help="drive_cfg acceleration ramp in duty/s (default: 1.5).",
+    )
+    parser.add_argument(
+        "--decel",
+        type=float,
+        default=3.0,
+        help="drive_cfg deceleration ramp in duty/s (default: 3.0).",
+    )
     parser.add_argument(
         "--seq",
         type=uint32_value,
@@ -110,15 +138,21 @@ def parse_arguments() -> argparse.Namespace:
     args = parser.parse_args()
 
     if args.stop or args.raw_line is not None:
-        if args.v is not None or args.w is not None:
-            parser.error("--v and --w cannot be combined with --stop or --raw-line")
-    elif args.v is None or args.w is None:
-        parser.error("provide both --v and --w, or use --stop or --raw-line")
+        if args.left is not None or args.right is not None or args.armed:
+            parser.error(
+                "--left/--right/--armed cannot be combined with --stop or --raw-line")
+    elif args.drive_cfg:
+        for name in ("max_duty", "accel", "decel"):
+            value = getattr(args, name)
+            if not math.isfinite(value):
+                parser.error(f"--{name.replace('_', '-')} must be finite")
+    elif args.left is None or args.right is None:
+        parser.error("provide both --left and --right, or use --drive-cfg/--stop/--raw-line")
 
-    if args.v is not None and (
-        not math.isfinite(args.v) or not math.isfinite(args.w)
+    if args.left is not None and (
+        not math.isfinite(args.left) or not math.isfinite(args.right)
     ):
-        parser.error("--v and --w must be finite numbers")
+        parser.error("--left and --right must be finite numbers")
 
     if (args.rate is None) != (args.duration is None):
         parser.error("--rate and --duration must be used together")
@@ -146,12 +180,21 @@ def build_command(args: argparse.Namespace, sequence: int) -> str:
 
     if args.stop:
         packet = {"type": "stop", "seq": sequence}
+    elif args.drive_cfg:
+        packet = {
+            "type": "drive_cfg",
+            "seq": sequence,
+            "accel": args.accel,
+            "decel": args.decel,
+            "max_duty": args.max_duty,
+            "armed": args.armed,
+        }
     else:
         packet = {
-            "type": "cmd",
+            "type": "drive_cmd",
             "seq": sequence,
-            "v": args.v,
-            "w": args.w,
+            "left": args.left,
+            "right": args.right,
         }
 
     return json.dumps(packet, separators=(",", ":"))

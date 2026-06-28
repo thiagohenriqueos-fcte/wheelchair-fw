@@ -5,10 +5,10 @@
 #include "driver/mcpwm_prelude.h"
 
 /* GPIO assignments for IBT-2 H-bridge inputs */
-#define LEFT_RPWM_GPIO   10
-#define LEFT_LPWM_GPIO   11
-#define RIGHT_RPWM_GPIO  12
-#define RIGHT_LPWM_GPIO  13
+#define LEFT_RPWM_GPIO   13
+#define LEFT_LPWM_GPIO   12
+#define RIGHT_RPWM_GPIO  14
+#define RIGHT_LPWM_GPIO  27
 
 /*
  * 20 MHz resolution -> period_ticks = 20 000 000 / 25 000 = 800.
@@ -73,26 +73,22 @@ static esp_err_t channel_init(motor_channel_t *ch, int gpio_fwd, int gpio_rev)
     if (ret != ESP_OK) return ret;
 
     /* Standard up-count PWM: set high at counter zero, set low at compare match */
-    ret = mcpwm_generator_set_actions_on_timer_event(ch->gen_fwd,
+    ret = mcpwm_generator_set_action_on_timer_event(ch->gen_fwd,
         MCPWM_GEN_TIMER_EVENT_ACTION(
-            MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH),
-        MCPWM_GEN_TIMER_EVENT_ACTION_END());
+            MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH));
     if (ret != ESP_OK) return ret;
-    ret = mcpwm_generator_set_actions_on_compare_event(ch->gen_fwd,
+    ret = mcpwm_generator_set_action_on_compare_event(ch->gen_fwd,
         MCPWM_GEN_COMPARE_EVENT_ACTION(
-            MCPWM_TIMER_DIRECTION_UP, ch->cmpr_fwd, MCPWM_GEN_ACTION_LOW),
-        MCPWM_GEN_COMPARE_EVENT_ACTION_END());
+            MCPWM_TIMER_DIRECTION_UP, ch->cmpr_fwd, MCPWM_GEN_ACTION_LOW));
     if (ret != ESP_OK) return ret;
 
-    ret = mcpwm_generator_set_actions_on_timer_event(ch->gen_rev,
+    ret = mcpwm_generator_set_action_on_timer_event(ch->gen_rev,
         MCPWM_GEN_TIMER_EVENT_ACTION(
-            MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH),
-        MCPWM_GEN_TIMER_EVENT_ACTION_END());
+            MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH));
     if (ret != ESP_OK) return ret;
-    ret = mcpwm_generator_set_actions_on_compare_event(ch->gen_rev,
+    ret = mcpwm_generator_set_action_on_compare_event(ch->gen_rev,
         MCPWM_GEN_COMPARE_EVENT_ACTION(
-            MCPWM_TIMER_DIRECTION_UP, ch->cmpr_rev, MCPWM_GEN_ACTION_LOW),
-        MCPWM_GEN_COMPARE_EVENT_ACTION_END());
+            MCPWM_TIMER_DIRECTION_UP, ch->cmpr_rev, MCPWM_GEN_ACTION_LOW));
     if (ret != ESP_OK) return ret;
 
     /* Force both outputs low immediately — safe state before motor is used */

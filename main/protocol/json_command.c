@@ -15,14 +15,25 @@
 #define COMMAND_RX_TASK_STACK_SIZE 4096
 #define COMMAND_RX_TASK_PRIORITY 5
 
+/* Hard ceilings the firmware enforces regardless of what the host requests. */
+#define DRIVE_MAX_DUTY_LIMIT 1.0f
+#define DRIVE_RATE_LIMIT     50.0f   /* ramp rate upper bound [duty / second] */
+
 static SemaphoreHandle_t state_mutex;
-static motion_command_t command_state;
-static motor_test_command_t motor_test_state;
+static drive_config_t drive_config_state;
+static drive_command_t drive_command_state;
 static uint32_t response_sequence;
 
 static uint32_t current_time_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static float clampf(float value, float lo, float hi)
+{
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
 }
 
 static bool read_uint32(const cJSON *item, uint32_t *value)
@@ -113,44 +124,63 @@ static esp_err_t send_error(const char *code)
     return send_json(packet);
 }
 
-static esp_err_t store_command(
+static esp_err_t store_drive_config(
     uint32_t host_sequence,
-    float v_linear,
-    float w_angular)
+    float accel,
+    float decel,
+    float max_duty,
+    bool armed)
 {
     if (xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) {
         return ESP_FAIL;
     }
 
-    command_state.v_linear = v_linear;
-    command_state.w_angular = w_angular;
-    command_state.host_seq = host_sequence;
-    command_state.last_update_ms = current_time_ms();
-    command_state.valid = true;
+    drive_config_state.accel          = clampf(accel,    0.0f, DRIVE_RATE_LIMIT);
+    drive_config_state.decel          = clampf(decel,    0.0f, DRIVE_RATE_LIMIT);
+    drive_config_state.max_duty       = clampf(max_duty, 0.0f, DRIVE_MAX_DUTY_LIMIT);
+    drive_config_state.armed          = armed;
+    drive_config_state.host_seq       = host_sequence;
+    drive_config_state.last_update_ms = current_time_ms();
+    drive_config_state.valid          = true;
 
     xSemaphoreGive(state_mutex);
     return ESP_OK;
 }
 
-static esp_err_t store_motor_test(uint32_t host_sequence, float left, float right)
+static esp_err_t store_drive_command(
+    uint32_t host_sequence,
+    float left,
+    float right)
 {
     if (xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) {
         return ESP_FAIL;
     }
 
-    motor_test_state.left           = left;
-    motor_test_state.right          = right;
-    motor_test_state.host_seq       = host_sequence;
-    motor_test_state.last_update_ms = current_time_ms();
-    motor_test_state.valid          = true;
+    drive_command_state.left           = clampf(left,  -1.0f, 1.0f);
+    drive_command_state.right          = clampf(right, -1.0f, 1.0f);
+    drive_command_state.host_seq       = host_sequence;
+    drive_command_state.last_update_ms = current_time_ms();
+    drive_command_state.valid          = true;
 
     xSemaphoreGive(state_mutex);
     return ESP_OK;
 }
 
-static void clear_motor_test_locked(void)
+/* `stop` keeps the tuning but forces the safety gate closed immediately. */
+static esp_err_t store_disarm(uint32_t host_sequence)
 {
-    motor_test_state = (motor_test_command_t){0};
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    drive_config_state.armed          = false;
+    drive_config_state.host_seq       = host_sequence;
+    drive_config_state.last_update_ms = current_time_ms();
+    drive_config_state.valid          = true;
+    drive_command_state               = (drive_command_t){0};
+
+    xSemaphoreGive(state_mutex);
+    return ESP_OK;
 }
 
 static void process_command_line(const char *line)
@@ -177,7 +207,33 @@ static void process_command_line(const char *line)
         return;
     }
 
-    if (strcmp(type->valuestring, "pwm_test") == 0) {
+    if (strcmp(type->valuestring, "drive_cfg") == 0) {
+        float accel = 0.0f;
+        float decel = 0.0f;
+        float max_duty = 0.0f;
+        const cJSON *a = cJSON_GetObjectItemCaseSensitive(packet, "accel");
+        const cJSON *d = cJSON_GetObjectItemCaseSensitive(packet, "decel");
+        const cJSON *m = cJSON_GetObjectItemCaseSensitive(packet, "max_duty");
+        const cJSON *armed_item =
+            cJSON_GetObjectItemCaseSensitive(packet, "armed");
+        if (!read_float(a, &accel) || !read_float(d, &decel) ||
+            !read_float(m, &max_duty) || !cJSON_IsBool(armed_item)) {
+            cJSON_Delete(packet);
+            send_error("invalid_command");
+            return;
+        }
+        const bool armed = cJSON_IsTrue(armed_item);
+        cJSON_Delete(packet);
+        if (store_drive_config(host_sequence, accel, decel, max_duty, armed)
+                != ESP_OK) {
+            send_error("state_update_failed");
+            return;
+        }
+        send_ack(host_sequence);
+        return;
+    }
+
+    if (strcmp(type->valuestring, "drive_cmd") == 0) {
         float left = 0.0f;
         float right = 0.0f;
         const cJSON *l = cJSON_GetObjectItemCaseSensitive(packet, "left");
@@ -188,7 +244,7 @@ static void process_command_line(const char *line)
             return;
         }
         cJSON_Delete(packet);
-        if (store_motor_test(host_sequence, left, right) != ESP_OK) {
+        if (store_drive_command(host_sequence, left, right) != ESP_OK) {
             send_error("state_update_failed");
             return;
         }
@@ -196,38 +252,18 @@ static void process_command_line(const char *line)
         return;
     }
 
-    float v_linear = 0.0f;
-    float w_angular = 0.0f;
-
-    if (strcmp(type->valuestring, "cmd") == 0) {
-        const cJSON *v = cJSON_GetObjectItemCaseSensitive(packet, "v");
-        const cJSON *w = cJSON_GetObjectItemCaseSensitive(packet, "w");
-        if (!read_float(v, &v_linear) || !read_float(w, &w_angular)) {
-            cJSON_Delete(packet);
-            send_error("invalid_command");
+    if (strcmp(type->valuestring, "stop") == 0) {
+        cJSON_Delete(packet);
+        if (store_disarm(host_sequence) != ESP_OK) {
+            send_error("state_update_failed");
             return;
         }
-    } else if (strcmp(type->valuestring, "stop") != 0) {
-        cJSON_Delete(packet);
-        send_error("unknown_type");
+        send_ack(host_sequence);
         return;
     }
 
     cJSON_Delete(packet);
-
-    if (strcmp(type->valuestring, "stop") == 0) {
-        if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-            clear_motor_test_locked();
-            xSemaphoreGive(state_mutex);
-        }
-    }
-
-    if (store_command(host_sequence, v_linear, w_angular) != ESP_OK) {
-        send_error("state_update_failed");
-        return;
-    }
-
-    send_ack(host_sequence);
+    send_error("unknown_type");
 }
 
 static void comm_rx_task(void *argument)
@@ -267,8 +303,8 @@ esp_err_t json_command_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    command_state = (motion_command_t){0};
-    motor_test_state = (motor_test_command_t){0};
+    drive_config_state = (drive_config_t){0};
+    drive_command_state = (drive_command_t){0};
     response_sequence = 0;
     return ESP_OK;
 }
@@ -290,9 +326,9 @@ esp_err_t json_command_start_receiver(void)
     return result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-esp_err_t json_command_get_state(motion_command_t *state)
+esp_err_t json_command_get_drive_config(drive_config_t *config)
 {
-    if (state == NULL) {
+    if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -304,14 +340,14 @@ esp_err_t json_command_get_state(motion_command_t *state)
         return ESP_FAIL;
     }
 
-    *state = command_state;
+    *config = drive_config_state;
     xSemaphoreGive(state_mutex);
     return ESP_OK;
 }
 
-esp_err_t json_command_get_motor_test(motor_test_command_t *state)
+esp_err_t json_command_get_drive_command(drive_command_t *command)
 {
-    if (state == NULL) {
+    if (command == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -323,7 +359,7 @@ esp_err_t json_command_get_motor_test(motor_test_command_t *state)
         return ESP_FAIL;
     }
 
-    *state = motor_test_state;
+    *command = drive_command_state;
     xSemaphoreGive(state_mutex);
     return ESP_OK;
 }
