@@ -3,6 +3,19 @@
 ESP-IDF firmware and Linux host tools for an ESP32-S3-based wheelchair
 control system.
 
+## LIDAR semi-assist layer
+
+The repository now includes a ROS 2 package in
+[`ros2/wheelchair_ros`](ros2/wheelchair_ros) for semi-assisted movement with an
+RPLIDAR. It reads the joystick intent from ESP telemetry, evaluates obstacle
+clearance from `/scan`, and sends assisted `drive_cmd` wheel commands back to
+the firmware while `drive_cfg` remains the safety gate.
+
+Start with wheels suspended and `assist_gain:=0.0` to validate braking/stop
+before enabling steering correction. See
+[`docs/ROS2_SEMI_ASSIST.md`](docs/ROS2_SEMI_ASSIST.md) and
+[`docs/TEST_PLAN_SEMI_ASSIST.md`](docs/TEST_PLAN_SEMI_ASSIST.md).
+
 The current project release is **v0.7.0**. This version adds quadrature encoder
 reading via the ESP32-S3 PCNT peripheral. Encoder counts and per-cycle deltas
 appear in joystick telemetry. The motor watchdog, STOP command, and GUI PWM
@@ -18,56 +31,55 @@ The firmware:
 - samples joystick X on GPIO1 / ADC1_CH0 and Y on GPIO2 / ADC1_CH1 at
   approximately 20 Hz using the ADC oneshot driver;
 - reports raw and normalized joystick values;
-- receives `cmd`, `stop`, and `pwm_test` JSON objects in the `comm_rx_task`;
-- stores the latest valid host command and its receive timestamp;
+- receives `drive_cfg`, `drive_cmd`, and `stop` JSON objects in the
+  `comm_rx_task`;
+- stores the latest valid drive config and assisted wheel command timestamps;
 - sends an ACK for valid commands and an error packet for invalid input;
-- includes the latest command and motor test state in joystick telemetry;
-- generates MCPWM PWM signals on GPIO10 (left RPWM), GPIO11 (left LPWM),
-  GPIO12 (right RPWM), GPIO13 (right LPWM) at 25 kHz;
+- includes drive mode, arm state, output duty, and assist state in telemetry;
+- generates MCPWM PWM signals on GPIO13 (left RPWM), GPIO12 (left LPWM),
+  GPIO14 (right RPWM), GPIO27 (right LPWM) at 25 kHz;
 - reads two quadrature encoders via PCNT: left A/B on GPIO4/GPIO5, right A/B
   on GPIO6/GPIO7 (4× decoding, 1 µs glitch filter);
 - never drives RPWM and LPWM simultaneously for the same motor channel;
-- stops all PWM if no `pwm_test` command is received within 500 ms (watchdog);
-- accepts duty-cycle commands up to ±1.0; the GUI PWM limit (default 0.30)
-  is the operator-facing safety gate — do not raise it without a suspended motor.
+- stops all PWM if the armed `drive_cfg` is stale, and stops assisted movement
+  if `drive_cmd` is stale;
+- applies the `max_duty` limit from `drive_cfg` (default host tools use 0.30);
+  do not raise it without suspended wheels.
 
 The joystick Y axis is inverted in software so that upward movement maps to
 positive Y and downward movement maps to negative Y. Raw ADC readings are not
 modified. A deadzone of `0.08` is applied around the default raw center of
 `2048`.
 
-Version 0.7 does **not** implement PI control, closed-loop motor control,
-odometry, or ROS 2.
+Version 0.7 does **not** implement PI control or closed-loop motor control.
 
 ## JSON protocol
 
 Every packet is one UTF-8 JSON object followed by `\n`.
 
-Movement command:
+Drive configuration / safety gate:
 
 ```json
-{"type":"cmd","seq":1,"v":0.2,"w":0.0}
+{"type":"drive_cfg","seq":1,"accel":1.5,"decel":3.0,"max_duty":0.30,"armed":true}
 ```
+
+Assisted wheel command:
+
+```json
+{"type":"drive_cmd","seq":2,"left":0.25,"right":0.10}
+```
+
+`left` and `right` are normalized wheel requests in `[-1.0, +1.0]`. The
+firmware still applies `max_duty`, acceleration/deceleration ramping, and
+freshness watchdogs.
 
 Stop command:
 
 ```json
-{"type":"stop","seq":2}
+{"type":"stop","seq":3}
 ```
 
-`v` is the requested linear velocity in m/s and `w` is the requested angular
-velocity in rad/s. They are stored but not acted upon in v0.5.
-
-PWM test command:
-
-```json
-{"type":"pwm_test","seq":3,"left":0.15,"right":0.00}
-```
-
-`left` and `right` are duty-cycle fractions. Positive drives RPWM; negative
-drives LPWM. The complementary output is held at zero. The firmware clamps
-values to ±0.30. If no fresh `pwm_test` command arrives within 500 ms, all
-PWM outputs are forced low automatically.
+`stop` disarms immediately and clears any pending assisted command.
 
 Successful commands receive an ACK:
 
@@ -81,16 +93,15 @@ Malformed JSON, unknown packet types, and invalid fields receive an error:
 {"type":"err","seq":2,"code":"invalid_json","status":"error"}
 ```
 
-Joystick telemetry includes the latest command, motor test state, and encoder counts:
+Drive telemetry includes joystick input, firmware state, and motor output:
 
 ```json
-{"type":"joy","seq":10,"t_ms":12345,"fw":"0.7.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"cmd_v":0.0,"cmd_w":0.0,"cmd_seq":1,"cmd_valid":true,"last_cmd_age_ms":50,"motor_left":0.15,"motor_right":0.0,"motor_test_active":true,"status":"ok","enc_left_count":1234,"enc_right_count":1230,"enc_left_delta":42,"enc_right_delta":41,"enc_status":"ok"}
+{"type":"drive","seq":10,"t_ms":12345,"fw":"0.7.0","raw_x":2030,"raw_y":2050,"x":0.02,"y":0.0,"out_left":0.12,"out_right":0.08,"armed":true,"driving":true,"drive_mode":"assist","assist_active":true,"max_duty":0.30,"accel":1.5,"decel":3.0,"cfg_age_ms":45,"assist_age_ms":20,"assist_left":0.40,"assist_right":0.27,"status":"ok"}
 ```
 
-Before the first valid command, `cmd_valid` is `false`, command values are
-zero, and `last_cmd_age_ms` is `null`. `motor_test_active` is `false` when no
-`pwm_test` command has been received, when a `stop` command clears the state,
-or when the 500 ms watchdog fires.
+`drive_mode` is `manual`, `assist`, `assist_timeout`, or `disarmed`. In manual
+mode, the ESP mixes the physical joystick locally. In assist mode, the ROS 2
+layer supplies `drive_cmd` values from the LIDAR cost function.
 
 `enc_left_count` / `enc_right_count` are running 32-bit totals since boot.
 `enc_left_delta` / `enc_right_delta` are counts accumulated in the current
@@ -133,10 +144,17 @@ source .venv/bin/activate
 python3 -m pip install -r requirements-dev.txt
 ```
 
-Send one movement command:
+Send a conservative armed drive config:
 
 ```bash
-python3 scripts/send_json_command.py /dev/ttyACM0 --v 0.20 --w 0.00
+python3 scripts/send_json_command.py /dev/ttyACM0 \
+    --drive-cfg --armed --max-duty 0.20 --accel 1.5 --decel 3.0
+```
+
+Send one assisted wheel command:
+
+```bash
+python3 scripts/send_json_command.py /dev/ttyACM0 --left 0.20 --right 0.20
 ```
 
 Send stop:
@@ -145,18 +163,18 @@ Send stop:
 python3 scripts/send_json_command.py /dev/ttyACM0 --stop
 ```
 
-Send commands at 10 Hz for 5 seconds:
+Send assisted wheel commands at 10 Hz for 5 seconds:
 
 ```bash
-python3 scripts/send_json_command.py /dev/ttyACM0 \
-    --v 0.20 --w 0.00 --rate 10 --duration 5
+python3 scripts/send_json_command.py /dev/ttyACM0 --left 0.20 --right 0.20 \
+    --rate 10 --duration 5
 ```
 
 Send a literal malformed line for error-path testing:
 
 ```bash
 python3 scripts/send_json_command.py /dev/ttyACM0 \
-    --raw-line '{"type":"cmd"'
+    --raw-line '{"type":"drive_cmd"'
 ```
 
 The script writes commands and reads ACK, error, heartbeat, status, and
@@ -175,35 +193,25 @@ Read and validate the JSON stream without sending commands:
 python3 scripts/read_json_serial.py /dev/ttyACM0
 ```
 
-Integrated control GUI (v0.6.2 — monitor, send commands, stream PWM, tune smoothing, fullscreen, configurable PWM limit):
+Integrated control GUI (monitor, tune drive config, LIDAR, IMU, fullscreen):
 
 ```bash
 python3 scripts/wheelchair_control_gui.py /dev/ttyACM0
 ```
 
-Reads telemetry and sends `pwm_test` / `stop` commands over the same serial
-connection, solving the one-process-per-port limitation. The GUI has four
-panels: connection status, joystick monitor, motor PWM monitor, and a motor
-control panel with sliders and buttons.
+Reads telemetry and sends `drive_cfg` / `stop` commands over the same serial
+connection, solving the one-process-per-port limitation. The GUI can arm the
+firmware's local differential-drive loop, tune `max_duty`, `accel`, and `decel`,
+and monitor LIDAR/IMU panels.
 
-**Send Once** sends a single `pwm_test` command with the current slider values.
-**Start PWM Stream** begins continuous sending at `PWM_STREAM_HZ` (10 Hz) using
-Tkinter's `after()` scheduler — moving a slider during an active stream takes
-effect on the next tick automatically. **Stop PWM Stream** cancels the stream.
-`STOP` is always active, immediately cancels streaming, sends a `stop` command,
-and zeros both sliders. Closing the window stops streaming and sends a `stop`
-command before releasing the serial port.
-
-All stream-related buttons are disabled until the safety checkbox is ticked.
+`STOP` is always active, disarms the firmware immediately, and sends a `stop`
+command before releasing the serial port on close.
 
 Press **F11** (or the Fullscreen button) to enter fullscreen. Press **Esc** or
 "Exit Fullscreen" to return. STOP remains always visible in fullscreen.
 
-A **PWM limit** slider in the motor control panel sets the maximum duty cycle
-the GUI will send (0.00–1.00, default 0.30). Click **Apply PWM Limit** to
-update the motor sliders and clamp current values. A warning appears when the
-limit exceeds 0.30. **Reset to 0.30** returns to the safe default. The firmware
-accepts up to ±1.0 but the GUI limit is the operator-facing safety gate.
+The `Duty máx` slider sets the maximum duty cycle the firmware will apply
+(0.00–1.00, default 0.30). A warning appears when the limit exceeds 0.30.
 
 A **Joystick smoothing settings** panel lets you tune three visualization
 parameters at runtime without restarting the GUI:
@@ -217,9 +225,6 @@ parameters at runtime without restarting the GUI:
 The joystick panel also shows `filt_x/y` (filtered) and `vis_x/y` (visual) so
 you can observe each stage of the smoothing pipeline. These controls affect
 visualization only and have no effect on motor commands.
-
-Default slider range: ±0.30 (conservative, for suspended-motor testing).
-Full ±1.0 range requires editing `SLIDER_MIN` / `SLIDER_MAX` in the script.
 
 Read-only monitor GUI (v0.5.1 — no send capability, one process needed):
 
