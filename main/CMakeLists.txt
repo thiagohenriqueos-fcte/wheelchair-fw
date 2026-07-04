@@ -10,6 +10,7 @@ idf_component_register(
         "app_main.c"
         "drivers/joystick_adc.c"
         "drivers/motor_pwm.c"
+        "drivers/encoder_pcnt.c"
         "protocol/json_command.c"
         "serial/serial_io.c"
         "telemetry/json_telemetry.c"
@@ -22,6 +23,8 @@ idf_component_register(
     REQUIRES
         esp_adc
         esp_driver_mcpwm
+        esp_driver_pcnt
+        esp_driver_gpio
         ${SERIAL_DRIVER_COMPONENT}
         esp_timer
 )

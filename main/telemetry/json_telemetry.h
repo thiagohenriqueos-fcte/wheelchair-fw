@@ -21,6 +21,8 @@ esp_err_t json_telemetry_send_drive(
     bool assist_active,
     bool driving,
     float out_left,
-    float out_right);
+    float out_right,
+    const int64_t *enc_counts,
+    int enc_count);
 
 #endif

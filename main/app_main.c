@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "encoder_pcnt.h"
 #include "json_command.h"
 #include "json_telemetry.h"
 #include "joystick_adc.h"
@@ -81,6 +82,9 @@ void app_main(void)
     const esp_err_t motor_init_result = motor_pwm_init();
     const bool motor_ready = motor_init_result == ESP_OK;
 
+    const esp_err_t encoder_init_result = encoder_pcnt_init();
+    const bool encoder_ready = encoder_init_result == ESP_OK;
+
     const esp_err_t command_init_result = json_command_init();
     const bool command_ready = command_init_result == ESP_OK;
     bool receiver_ready = false;
@@ -97,6 +101,10 @@ void app_main(void)
         "motor_pwm",
         motor_ready ? "ok" : "error",
         motor_ready ? NULL : esp_err_to_name(motor_init_result));
+    json_telemetry_send_status(
+        "encoder_pcnt",
+        encoder_ready ? "ok" : "error",
+        encoder_ready ? NULL : esp_err_to_name(encoder_init_result));
     json_telemetry_send_status(
         "command_receiver",
         receiver_ready ? "ok" : "error",
@@ -188,9 +196,14 @@ void app_main(void)
             }
         }
 
+        int64_t enc_counts[ENCODER_COUNT];
+        const bool enc_ok =
+            encoder_ready && encoder_pcnt_read(enc_counts) == ESP_OK;
+
         telemetry_sequence++;
         json_telemetry_send_drive(
             telemetry_sequence, &sample, &config, &assist, assist_active,
-            driving, cur_left, cur_right);
+            driving, cur_left, cur_right,
+            enc_ok ? enc_counts : NULL, enc_ok ? ENCODER_COUNT : 0);
     }
 }

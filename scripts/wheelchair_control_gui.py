@@ -100,6 +100,12 @@ BAR_W    = 220
 BAR_H    = 26
 BAR_HALF = BAR_W // 2
 
+# ── Wheel / encoder visualiser ────────────────────────────────────────────────
+WHEEL_CANVAS      = 96           # per-wheel canvas size (px)
+WHEEL_SPOKES      = 6            # spokes drawn on the tire
+ENCODER_CPR_DEFAULT = 8000       # counts per revolution (PPR*4); overridden by FW
+ENC_RPM_ALPHA     = 0.30         # smoothing for the RPM readout
+
 
 # ── Timing / smoothing ────────────────────────────────────────────────────────
 
@@ -211,23 +217,27 @@ C_IMU_GROUND = "#5f4a2a"
 C_IMU_HORIZON = "#cdd6f4"
 C_IMU_NEEDLE = "#f38ba8"
 
+# Wheel visualiser colours
+C_WHEEL_TIRE  = "#45475a"     # tire ring
+C_WHEEL_HUB   = "#cdd6f4"     # hub dot
+C_WHEEL_SPOKE = "#89b4fa"     # spokes at rest / idle
+C_WHEEL_FWD   = "#a6e3a1"     # spokes when turning forward
+C_WHEEL_REV   = "#f38ba8"     # spokes when turning in reverse
 
-# ── Velocity estimation (from IMU) ────────────────────────────────────────────
+
+# ── Velocity estimation ───────────────────────────────────────────────────────
 #
-# Linear velocity is integrated from the forward (y) accelerometer; angular
-# velocity is the z gyro (already a rate). Accel integration drifts, so a tare
-# (bias capture), ZUPT (zero-velocity update when still) and a gentle leak keep
-# it bounded — treat the value as a reference, not a precise measurement.
+# Linear velocity comes from the wheel ENCODERS: an "aro 26" rim gives a wheel
+# circumference, and v = (wheel rev/s) · circumference, averaged over both wheels.
+# Angular velocity ω is the IMU z gyro (already a rate) and drives heading.
 
-VEL_GRAVITY      = 9.80665      # m/s² per g
+WHEEL_DIAMETER_M = 26 * 0.0254               # aro 26" ≈ 0.660 m outer diameter
+WHEEL_CIRCUM_M   = math.pi * WHEEL_DIAMETER_M  # ≈ 2.075 m travelled per wheel rev
+
 VEL_HIST_SECONDS = 10.0         # strip-chart window
-VEL_SAMPLE_HZ    = 20           # ≈ imu_data emit rate
+VEL_SAMPLE_HZ    = 20           # ≈ drive/imu emit rate
 VEL_HIST_LEN     = int(VEL_HIST_SECONDS * VEL_SAMPLE_HZ)
-VEL_LEAK         = 0.05         # gentle drift bound [1/s] (exp decay)
-VEL_ZUPT_A       = 0.15         # m/s² — "still" accel threshold
-VEL_ZUPT_W       = 2.0          # °/s — "still" yaw-rate threshold
-VEL_ZUPT_HOLD    = 0.30         # s still before zeroing velocity
-VEL_DT_MAX       = 0.50         # s — skip integration across longer gaps
+VEL_DT_MAX       = 0.50         # s — skip dead-reckoning across longer gaps
 
 VEL_PLOT_W = 420
 VEL_PLOT_H = 110
@@ -672,6 +682,14 @@ class WheelchairControlGUI:
         self.armed_fw = False     # firmware-reported armed gate
         self.driving  = False     # firmware-reported actually-driving
 
+        # Wheel encoders (reported by firmware): total signed counts + scale.
+        self.enc_counts: List[int] = [0, 0]
+        self.enc_cpr = ENCODER_CPR_DEFAULT      # counts per revolution (PPR*4)
+        self.enc_present = False                # True once an "enc" field arrives
+        self._enc_prev_counts: List[Optional[int]] = [None, None]
+        self._enc_prev_t: Optional[float] = None
+        self._enc_rpm: List[float] = [0.0, 0.0]
+
         # Drive config (GUI is the source of truth)
         self._max_duty = MAX_DUTY_DEFAULT
         self._accel    = ACCEL_DEFAULT
@@ -723,14 +741,10 @@ class WheelchairControlGUI:
         self._imu_init_port = imu_port or IMU_DEFAULT_PORT
         self._imu_init_baud = imu_baud
 
-        # Velocity estimation (integrated from the IMU)
-        self._vel_v   = 0.0           # integrated linear velocity [m/s]
+        # Velocity: linear from encoders (aro 26), angular from IMU z gyro.
+        self._vel_v   = 0.0           # linear velocity [m/s] (encoder-derived)
         self._vel_wz  = 0.0           # angular velocity (z gyro) [°/s]
-        self._vel_ay_bias = 0.0       # forward-accel bias [g] captured by tare
-        self._vel_tared = False       # auto-tare on first IMU sample
-        self._vel_last_t: Optional[float] = None
-        self._vel_zupt = True
-        self._vel_still_since: Optional[float] = None
+        self._vel_last_t: Optional[float] = None   # dt source for dead-reckoning
         self._vel_hist_v: "deque[float]" = deque(maxlen=VEL_HIST_LEN)
         self._vel_hist_w: "deque[float]" = deque(maxlen=VEL_HIST_LEN)
         self._vel_dirty = False
@@ -949,6 +963,62 @@ class WheelchairControlGUI:
             fill=X, pady=8)
         self._right_bar, self._sv_right_lbl = self._build_motor_section(
             parent, "Direita    GPIO14 / GPIO27")
+
+        ttk.Separator(parent, orient=HORIZONTAL, bootstyle="secondary").pack(
+            fill=X, pady=8)
+        self._build_wheels_section(parent)
+
+    def _build_wheels_section(self, parent: tk.Widget) -> None:
+        """Two live wheels driven by the quadrature encoders (PCNT)."""
+        ttk.Label(parent, text="Rodas (encoders)", font=("", 9, "bold")).pack(
+            anchor=W)
+
+        row = ttk.Frame(parent)
+        row.pack(fill=X, pady=(4, 0))
+
+        self._wheel_canvas: List[tk.Canvas] = []
+        self._sv_enc: List[tk.StringVar] = []
+        specs = [("enc0  A32/B33", 0), ("enc1  A25/B26", 1)]
+        for title, idx in specs:
+            cell = ttk.Frame(row)
+            cell.pack(side=LEFT, expand=True, padx=6)
+            ttk.Label(cell, text=title, foreground=C_MUTED,
+                      font=("", 8)).pack()
+            canvas = tk.Canvas(
+                cell, width=WHEEL_CANVAS, height=WHEEL_CANVAS,
+                background=C_CANVAS_BG, highlightthickness=1,
+                highlightbackground=C_CIRCLE)
+            canvas.pack(pady=(2, 2))
+            self._wheel_canvas.append(canvas)
+            var = tk.StringVar(value="0  •  0 RPM")
+            ttk.Label(cell, textvariable=var, font=("", 8)).pack()
+            self._sv_enc.append(var)
+            self._draw_wheel(canvas, 0.0, 0.0)
+
+    def _draw_wheel(self, canvas: tk.Canvas, angle_deg: float,
+                    rpm: float) -> None:
+        """Redraw one wheel: tire ring + hub + spokes rotated by angle_deg."""
+        canvas.delete("spoke")
+        c = WHEEL_CANVAS / 2.0
+        r = c - 8
+        if not canvas.find_withtag("tire"):
+            canvas.create_oval(c - r, c - r, c + r, c + r,
+                               outline=C_WHEEL_TIRE, width=6, tags="tire")
+            canvas.create_oval(c - 4, c - 4, c + 4, c + 4,
+                               fill=C_WHEEL_HUB, outline="", tags="hub")
+        if rpm > 1.0:
+            colour = C_WHEEL_FWD
+        elif rpm < -1.0:
+            colour = C_WHEEL_REV
+        else:
+            colour = C_WHEEL_SPOKE
+        base = math.radians(angle_deg)
+        for k in range(WHEEL_SPOKES):
+            a = base + k * (2.0 * math.pi / WHEEL_SPOKES)
+            canvas.create_line(
+                c, c, c + (r - 3) * math.cos(a), c + (r - 3) * math.sin(a),
+                fill=colour, width=2, tags="spoke")
+        canvas.tag_raise("hub")
 
     def _build_motor_section(
         self, parent: tk.Widget, title: str,
@@ -1595,47 +1665,24 @@ class WheelchairControlGUI:
     # ── Velocity estimation (from IMU) ────────────────────────────────────────
 
     def _integrate_velocity(self, imu: Dict[str, float]) -> None:
-        """Integrate forward accel → linear velocity; take z gyro as ω. Runs on
-        every imu_data sample with real wall-clock dt (drift-bounded via leak +
-        ZUPT)."""
-        # Auto-tare on first sample (captures static bias)
-        if not self._vel_tared:
-            self._vel_ay_bias = imu.get("ay", 0.0)
-            self._vel_tared = True
-            return
-
+        """Angular velocity ω from the z gyro (heading), linear velocity from the
+        encoders. Runs on every imu_data sample; dead-reckons pose from the
+        encoder speed along the IMU heading (unicycle model)."""
         now = time.monotonic()
-        if self._vel_last_t is None:
-            self._vel_last_t = now
-            return
-        dt = now - self._vel_last_t
+        self._vel_wz = imu.get("wz", 0.0)          # °/s
+        self._vel_hist_w.append(self._vel_wz)
+        self._vel_dirty = True
+
+        dt = 0.0
+        if self._vel_last_t is not None:
+            dt = now - self._vel_last_t
         self._vel_last_t = now
         if dt <= 0.0 or dt > VEL_DT_MAX:
             return
 
-        a  = (imu.get("ay", 0.0) - self._vel_ay_bias) * VEL_GRAVITY   # m/s²
-        wz = imu.get("wz", 0.0)                                       # °/s
-
-        self._vel_v += a * dt
-        self._vel_v *= math.exp(-VEL_LEAK * dt)                       # gentle leak
-
-        if self._vel_zupt:
-            if abs(a) < VEL_ZUPT_A and abs(wz) < VEL_ZUPT_W:
-                if self._vel_still_since is None:
-                    self._vel_still_since = now
-                elif now - self._vel_still_since > VEL_ZUPT_HOLD:
-                    self._vel_v = 0.0
-            else:
-                self._vel_still_since = None
-
-        self._vel_wz = wz
-        self._vel_hist_v.append(self._vel_v)
-        self._vel_hist_w.append(wz)
-        self._vel_dirty = True
-
         # Pose: the LIDAR (slam_toolbox) pose is authoritative while fresh;
-        # otherwise dead-reckon from IMU yaw + integrated velocity.
-        if time.monotonic() - self._pose_lidar_t < POSE_LIDAR_TIMEOUT:
+        # otherwise dead-reckon from IMU yaw + encoder linear velocity.
+        if now - self._pose_lidar_t < POSE_LIDAR_TIMEOUT:
             return
         self._pose_src = "IMU"
         yaw = imu.get("yaw")
@@ -1678,7 +1725,7 @@ class WheelchairControlGUI:
 
         hv = ttk.Frame(frm)
         hv.pack(fill=X)
-        ttk.Label(hv, text="Velocidade linear   v = ∫aᵧ dt",
+        ttk.Label(hv, text="Velocidade linear   v = rodas (encoders, aro 26)",
                   foreground=C_MUTED, font=("", 9)).pack(side=LEFT)
         ttk.Label(hv, textvariable=self._sv_vel_v, font=("Courier", 13, "bold"),
                   bootstyle="info").pack(side=RIGHT)
@@ -1702,24 +1749,10 @@ class WheelchairControlGUI:
         self._vel_line_w, self._vel_scale_w = self._init_strip(
             self._vel_canvas_w, C_VEL_ANG)
 
-        ctl = ttk.Frame(frm)
-        ctl.pack(fill=X)
-        ttk.Button(ctl, text="Tara (parado)", bootstyle="secondary-outline",
-                   command=self._on_vel_tare, padding=(8, 3)).pack(
-            side=LEFT, padx=(0, 6))
-        ttk.Button(ctl, text="Zerar v", bootstyle="secondary-outline",
-                   command=self._on_vel_reset, padding=(8, 3)).pack(
-            side=LEFT, padx=(0, 6))
-        self._var_vel_zupt = tk.BooleanVar(value=self._vel_zupt)
-        ttk.Checkbutton(ctl, text="ZUPT (zera v parado)",
-                        variable=self._var_vel_zupt, command=self._on_vel_zupt,
-                        bootstyle="round-toggle").pack(side=LEFT)
-
         ttk.Label(
             frm,
-            text="⚠  v é integrada do acelerômetro e sofre deriva. Use Tara com "
-                 "a cadeira parada e nivelada; ZUPT zera v ao detectar parada. "
-                 "Trate como referência, não medida precisa.",
+            text="v vem da rotação das rodas (encoders, aro 26 → circunferência "
+                 f"{WHEEL_CIRCUM_M:.2f} m). ω_z e orientação vêm do giroscópio do IMU.",
             foreground=C_MUTED, font=("", 8), wraplength=VEL_PLOT_W,
             justify=LEFT).pack(fill=X, pady=(10, 0))
 
@@ -1758,17 +1791,6 @@ class WheelchairControlGUI:
         canvas.coords(line, *coords)
         canvas.itemconfigure(scale, text=f"escala ±{m:.1f} {unit}")
 
-    def _on_vel_tare(self) -> None:
-        self._vel_ay_bias = self._imu.get("ay", 0.0)
-        self._vel_v = 0.0
-        self._vel_still_since = None
-
-    def _on_vel_reset(self) -> None:
-        self._vel_v = 0.0
-        self._vel_still_since = None
-
-    def _on_vel_zupt(self) -> None:
-        self._vel_zupt = self._var_vel_zupt.get()
 
     # ── Pose / trajectory panel ───────────────────────────────────────────────
 
@@ -1997,6 +2019,46 @@ class WheelchairControlGUI:
         self.armed_fw = bool(pkt.get("armed", False))
         self.driving  = bool(pkt.get("driving", False))
 
+        self._handle_encoders(pkt)
+
+    def _handle_encoders(self, pkt: Dict[str, Any]) -> None:
+        """Update encoder counts + RPM from a drive packet's `enc` array."""
+        enc = pkt.get("enc")
+        if not isinstance(enc, list) or not enc:
+            return
+        self.enc_present = True
+        cpr = finite_float(pkt.get("enc_cpr"))
+        if cpr and cpr > 0:
+            self.enc_cpr = cpr
+
+        counts: List[int] = []
+        for i in range(len(self.enc_counts)):
+            v = finite_float(enc[i]) if i < len(enc) else None
+            counts.append(int(v) if v is not None else self.enc_counts[i])
+        self.enc_counts = counts
+
+        # RPM from the count delta between consecutive packets.
+        now = time.monotonic()
+        if self._enc_prev_t is not None:
+            dt = now - self._enc_prev_t
+            if dt > 1e-3:
+                for i, c in enumerate(counts):
+                    prev = self._enc_prev_counts[i]
+                    if prev is not None:
+                        rpm = (c - prev) / self.enc_cpr / dt * 60.0
+                        self._enc_rpm[i] = exp_step(
+                            self._enc_rpm[i], rpm, ENC_RPM_ALPHA)
+        self._enc_prev_counts = list(counts)
+        self._enc_prev_t = now
+
+        # Linear velocity from wheel speed (aro 26): per wheel v = (rpm/60)·circ,
+        # robot v = mean of both wheels. Feeds the velocity plot + dead-reckoning.
+        v_left  = self._enc_rpm[0] / 60.0 * WHEEL_CIRCUM_M
+        v_right = self._enc_rpm[1] / 60.0 * WHEEL_CIRCUM_M
+        self._vel_v = (v_left + v_right) / 2.0
+        self._vel_hist_v.append(self._vel_v)
+        self._vel_dirty = True
+
     # ── GUI frame ─────────────────────────────────────────────────────────────
 
     def _gui_frame(self) -> None:
@@ -2027,6 +2089,17 @@ class WheelchairControlGUI:
         self._update_bar(self._right_bar, self.out_right)
         self._sv_left_lbl.set(duty_label(self.out_left))
         self._sv_right_lbl.set(duty_label(self.out_right))
+
+        # Wheel encoders — rotate each wheel by its measured count.
+        for i, canvas in enumerate(self._wheel_canvas):
+            count = self.enc_counts[i]
+            rpm = self._enc_rpm[i]
+            angle = (count / self.enc_cpr * 360.0) % 360.0 if self.enc_cpr else 0.0
+            self._draw_wheel(canvas, angle, rpm)
+            if self.enc_present:
+                self._sv_enc[i].set(f"{count}  •  {rpm:+.0f} RPM")
+            else:
+                self._sv_enc[i].set("sem dados")
 
         if self.driving:
             self._sv_drive_state.set("ANDANDO")

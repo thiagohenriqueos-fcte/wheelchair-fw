@@ -2,7 +2,7 @@
 #define WHEELCHAIR_FIRMWARE_VERSION_H
 
 #define FIRMWARE_NAME "Wheelchair ESP32-WROOM Firmware"
-#define FIRMWARE_VERSION "0.7.0"
+#define FIRMWARE_VERSION "0.8.0"
 #define HARDWARE_TARGET "ESP32-WROOM"
 
 #endif

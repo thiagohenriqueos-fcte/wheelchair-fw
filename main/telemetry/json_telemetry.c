@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "cJSON.h"
+#include "encoder_pcnt.h"
 #include "esp_timer.h"
 #include "serial_io.h"
 #include "version.h"
@@ -95,7 +96,9 @@ esp_err_t json_telemetry_send_drive(
     bool assist_active,
     bool driving,
     float out_left,
-    float out_right)
+    float out_right,
+    const int64_t *enc_counts,
+    int enc_count)
 {
     if (sample == NULL || config == NULL || assist == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -160,6 +163,23 @@ esp_err_t json_telemetry_send_drive(
         packet_complete =
             packet_complete &&
             cJSON_AddNullToObject(packet, "assist_age_ms") != NULL;
+    }
+
+    /* Wheel encoders: total signed counts + counts-per-revolution scale. */
+    if (enc_counts != NULL && enc_count > 0) {
+        cJSON *enc_array = cJSON_AddArrayToObject(packet, "enc");
+        packet_complete = packet_complete && enc_array != NULL;
+        for (int i = 0; enc_array != NULL && i < enc_count; i++) {
+            cJSON *item = cJSON_CreateNumber((double)enc_counts[i]);
+            if (item == NULL || !cJSON_AddItemToArray(enc_array, item)) {
+                cJSON_Delete(item);
+                packet_complete = false;
+                break;
+            }
+        }
+        packet_complete =
+            packet_complete &&
+            cJSON_AddNumberToObject(packet, "enc_cpr", ENCODER_CPR) != NULL;
     }
 
     if (!packet_complete) {
