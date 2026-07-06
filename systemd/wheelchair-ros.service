@@ -1,0 +1,28 @@
+[Unit]
+Description=Cadeira de rodas — stack ROS 2 (supervisor semi-assistido + navegação)
+Documentation=file:///home/wheelchair/wheelchair-fw/docs/ROS2_AUTOSTART.md
+# Sobe depois que o sistema multiusuário e o udev (symlinks /dev/wheelchair/*)
+# estão prontos. Roda independentemente de haver login gráfico/GUI.
+After=multi-user.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=wheelchair
+Group=wheelchair
+WorkingDirectory=/home/wheelchair
+# HOME é necessário para os logs do ROS (~/.ros).
+Environment=HOME=/home/wheelchair
+Environment=ROS_DOMAIN_ID=0
+# Argumentos do launch (nav/armed/...). O '-' torna o arquivo opcional.
+EnvironmentFile=-/etc/default/wheelchair-ros
+ExecStart=/home/wheelchair/wheelchair-fw/scripts/wheelchair_ros_boot.sh
+# Reinicia se cair (queda de nó, brownout do USB, etc.).
+Restart=on-failure
+RestartSec=5
+# Encerramento limpo: SIGINT deixa os nós ROS desligarem e a ponte mandar stop.
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

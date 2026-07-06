@@ -1,0 +1,20 @@
+# Symlinks estáveis para os dispositivos seriais da cadeira de rodas.
+#
+# Instale com:  sudo cp 99-wheelchair.rules /etc/udev/rules.d/
+#               sudo udevadm control --reload-rules && sudo udevadm trigger
+# (ou use scripts/install_wheelchair_service.sh)
+#
+# IMPORTANTE: ESP32 e RPLIDAR usam o MESMO chip Silicon Labs (10c4:ea60), então
+# precisam ser distinguidos pelo número de série (ATTRS{serial}). Confirme os
+# seriais com:  scripts/gen_udev_rules.sh  (com os 3 dispositivos conectados).
+#
+# Valores confirmados em bancada (2026-07): esp32=0001, lidar=b491…, imu=19f5:5740.
+
+# ── ESP32 — Silicon Labs CP2102, serial "0001" ───────────────────────────────
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="0001", SYMLINK+="wheelchair/esp32", MODE="0666"
+
+# ── RPLIDAR — Silicon Labs CP2102N, serial único ─────────────────────────────
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="b491f8d0167fef119de21e1cedd322a4", SYMLINK+="wheelchair/lidar", MODE="0666"
+
+# ── IMU WitMotion (ponte NATIONS N32L40x, CDC-ACM) ───────────────────────────
+SUBSYSTEM=="tty", ATTRS{idVendor}=="19f5", ATTRS{idProduct}=="5740", SYMLINK+="wheelchair/imu", MODE="0666"
