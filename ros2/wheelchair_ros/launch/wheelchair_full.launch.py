@@ -141,6 +141,9 @@ def generate_launch_description():
         executable='rf2o_laser_odometry_node',
         name='rf2o_laser_odometry',
         condition=IfCondition(nav),
+        # rf2o loga a pose em nível INFO a cada ciclo (~10 Hz), o que inunda o
+        # journal no boot; sobe o nível para WARN.
+        arguments=['--ros-args', '--log-level', 'rf2o_laser_odometry:=warn'],
         parameters=[{
             'laser_scan_topic': '/scan',
             'odom_topic': '/odom_rf2o',
