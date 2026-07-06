@@ -162,7 +162,13 @@ class SharedControl(Node):
         best_delta, front_clear, best_clear, all_blocked = self._best_direction(
             self._scan, w_user)
 
-        if all_blocked or best_clear <= self.stop_d:
+        # Parada e velocidade se baseiam na folga REAL à frente (front_clear),
+        # não na melhor direção teórica. Com assist_gain baixo a cadeira não
+        # esterça o suficiente, então usar best_clear a mandaria a toda
+        # velocidade reto contra o obstáculo "achando" que vai desviar. O desvio
+        # (assist_gain*best_delta) ainda ajuda a arquear para o lado livre, mas
+        # em velocidade reduzida e sem anular a parada frontal.
+        if all_blocked or front_clear <= self.stop_d:
             self._publish(0.0, w_user, "para", front_clear, best_clear,
                           best_delta)
             self.get_logger().info(
@@ -170,20 +176,20 @@ class SharedControl(Node):
                 throttle_duration_sec=1.0)
             return
 
-        clear_for_speed = best_clear if front_clear <= self.stop_d else front_clear
-        speed_scale = self._speed_scale(clear_for_speed)
+        speed_scale = self._speed_scale(front_clear)
+        applied_delta = self.assist_gain * best_delta
 
-        # Frente totalmente livre: zero intervention, even if a side candidate
-        # has a mathematically tiny cost advantage.
+        # Frente totalmente livre: zero intervention.
         if front_clear >= self.slow_d or math.isinf(front_clear):
             best_delta = 0.0
+            applied_delta = 0.0
             speed_scale = 1.0
             mode = "livre"
         else:
-            mode = "desvia" if abs(best_delta) > math.radians(1.0) else "freia"
+            mode = "desvia" if abs(applied_delta) > math.radians(1.0) else "freia"
 
         out_v = v_user * speed_scale
-        out_w = w_user + self.assist_gain * best_delta
+        out_w = w_user + applied_delta
         self._publish(out_v, out_w, mode, front_clear, best_clear, best_delta)
 
     def _best_direction(
