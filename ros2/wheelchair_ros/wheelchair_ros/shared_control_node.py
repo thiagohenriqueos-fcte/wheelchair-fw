@@ -42,6 +42,10 @@ class SharedControl(Node):
         self.declare_parameter("slow_distance", 1.10)
         self.declare_parameter("cone_half_deg", 15.0)
         self.declare_parameter("max_deviation_deg", 45.0)
+        # Frente real do chassi vs 0 do sensor (o LIDAR pode estar montado girado)
+        self.declare_parameter("front_offset_deg", 0.0)
+        # Ignora retornos mais perto que isto (estrutura da própria cadeira)
+        self.declare_parameter("min_obstacle_range", 0.12)
         self.declare_parameter("num_candidates", 19)
         self.declare_parameter("w_obstacle", 1.0)
         self.declare_parameter("w_deviation", 0.35)
@@ -58,6 +62,8 @@ class SharedControl(Node):
         self.slow_d = float(gp("slow_distance").value)
         self.cone_half = math.radians(float(gp("cone_half_deg").value))
         self.dev_max = math.radians(float(gp("max_deviation_deg").value))
+        self.front_offset = math.radians(float(gp("front_offset_deg").value))
+        self.min_range = float(gp("min_obstacle_range").value)
         self.n_cand = max(3, int(gp("num_candidates").value))
         self.w_obs = float(gp("w_obstacle").value)
         self.w_dev = float(gp("w_deviation").value)
@@ -83,10 +89,36 @@ class SharedControl(Node):
             String, "wheelchair/assist_status", 10)
         self.create_timer(1.0 / rate, self._control_step)
 
+        # Ajuste ao vivo dos parâmetros de calibração (ros2 param set ...)
+        self.add_on_set_parameters_callback(self._on_params)
+
         self.get_logger().info(
             "shared_control pronto: "
             f"stop={self.stop_d:.2f} m, slow={self.slow_d:.2f} m, "
-            f"desvio_max={math.degrees(self.dev_max):.0f} graus")
+            f"cone=±{math.degrees(self.cone_half):.0f}°, "
+            f"desvio_max=±{math.degrees(self.dev_max):.0f}°, "
+            f"front_offset={math.degrees(self.front_offset):.0f}°, "
+            f"min_range={self.min_range:.2f} m")
+
+    def _on_params(self, params):
+        from rcl_interfaces.msg import SetParametersResult
+        for p in params:
+            v = p.value
+            if p.name == "front_offset_deg":
+                self.front_offset = math.radians(float(v))
+            elif p.name == "min_obstacle_range":
+                self.min_range = float(v)
+            elif p.name == "stop_distance":
+                self.stop_d = float(v)
+            elif p.name == "slow_distance":
+                self.slow_d = float(v)
+            elif p.name == "cone_half_deg":
+                self.cone_half = math.radians(float(v))
+            elif p.name == "max_deviation_deg":
+                self.dev_max = math.radians(float(v))
+            elif p.name == "assist_gain":
+                self.assist_gain = float(v)
+        return SetParametersResult(successful=True)
 
     def _on_scan(self, msg: LaserScan) -> None:
         self._scan = msg
@@ -185,12 +217,16 @@ class SharedControl(Node):
         return best_delta, front_clear, best_clear, all_blocked
 
     def _clearance(self, scan: LaserScan, heading: float) -> float:
+        # heading é relativo à frente do chassi; soma o offset de montagem para
+        # comparar com o ângulo do feixe (0 do sensor).
+        aim = heading + self.front_offset
+        floor = max(scan.range_min, self.min_range)
         best = math.inf
         angle = scan.angle_min
         for distance in scan.ranges:
-            if abs(_angle_diff(angle, heading)) <= self.cone_half:
+            if abs(_angle_diff(angle, aim)) <= self.cone_half:
                 if (math.isfinite(distance)
-                        and scan.range_min <= distance <= scan.range_max):
+                        and floor <= distance <= scan.range_max):
                     best = min(best, float(distance))
             angle += scan.angle_increment
         return best
