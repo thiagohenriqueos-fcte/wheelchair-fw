@@ -23,7 +23,7 @@ from geometry_msgs.msg import Quaternion, Twist
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32MultiArray, String
 
 import serial
 
@@ -99,6 +99,8 @@ class EspBridge(Node):
         self._odom_x = 0.0
         self._odom_y = 0.0
         self._odom_yaw = 0.0
+        self._dist_l = 0.0
+        self._dist_r = 0.0
 
         self.pub_raw = self.create_publisher(
             String, "wheelchair/telemetry_json", 10)
@@ -109,6 +111,9 @@ class EspBridge(Node):
         self.pub_bridge_armed = self.create_publisher(
             Bool, "wheelchair/bridge_armed", 10)
         self.pub_wheel_odom = self.create_publisher(Odometry, "wheel/odom", 10)
+        # [dist_l, dist_r, vel_l, vel_r] — para calibração e futuro PID.
+        self.pub_wheel_tel = self.create_publisher(
+            Float32MultiArray, "wheel/telemetry", 10)
 
         self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, 10)
 
@@ -274,9 +279,15 @@ class EspBridge(Node):
         self._odom_y += ds * math.sin(mid)
         self._odom_yaw += dyaw
 
+        self._dist_l += ds_l
+        self._dist_r += ds_r
+        vel_l = ds_l / dt if dt > 1e-6 else 0.0
+        vel_r = ds_r / dt if dt > 1e-6 else 0.0
         vx = ds / dt if dt > 1e-6 else 0.0
         vyaw = dyaw / dt if dt > 1e-6 else 0.0
         self._publish_wheel_odom(vx, vyaw)
+        self.pub_wheel_tel.publish(Float32MultiArray(
+            data=[self._dist_l, self._dist_r, vel_l, vel_r]))
 
     def _publish_wheel_odom(self, vx: float, vyaw: float) -> None:
         odom = Odometry()
