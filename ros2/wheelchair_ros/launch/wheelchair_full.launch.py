@@ -62,6 +62,11 @@ def generate_launch_description():
                               description='Ganho de desvio (0 = só freio/parada)'),
         DeclareLaunchArgument('stop_distance', default_value='0.45'),
         DeclareLaunchArgument('slow_distance', default_value='1.10'),
+        # Calibrado em bancada p/ esta montagem do LIDAR (frente do chassi ~149°
+        # no referencial do sensor). A estrutura da cadeira fica fora do cone.
+        DeclareLaunchArgument('front_offset_deg', default_value='149.0'),
+        DeclareLaunchArgument('cone_half_deg', default_value='20.0'),
+        DeclareLaunchArgument('min_obstacle_range', default_value='0.20'),
         DeclareLaunchArgument('esp_port', default_value='/dev/wheelchair/esp32'),
         DeclareLaunchArgument('esp_baud', default_value='115200'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/wheelchair/lidar'),
@@ -121,6 +126,9 @@ def generate_launch_description():
             'assist_gain': LaunchConfiguration('assist_gain'),
             'stop_distance': LaunchConfiguration('stop_distance'),
             'slow_distance': LaunchConfiguration('slow_distance'),
+            'front_offset_deg': LaunchConfiguration('front_offset_deg'),
+            'cone_half_deg': LaunchConfiguration('cone_half_deg'),
+            'min_obstacle_range': LaunchConfiguration('min_obstacle_range'),
         }],
         output='screen',
     )
