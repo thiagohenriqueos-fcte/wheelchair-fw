@@ -69,6 +69,9 @@ def generate_launch_description():
         DeclareLaunchArgument('min_obstacle_range', default_value='0.20'),
         DeclareLaunchArgument('esp_port', default_value='/dev/wheelchair/esp32'),
         DeclareLaunchArgument('esp_baud', default_value='115200'),
+        # Odometria por encoder (alimenta o EKF / futuro PID). MEDIR wheel_radius.
+        DeclareLaunchArgument('wheel_radius', default_value='0.165'),
+        DeclareLaunchArgument('wheel_base', default_value='0.60'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/wheelchair/lidar'),
         DeclareLaunchArgument('lidar_baud', default_value='460800',
                               description='C1: 460800, A1M8: 115200'),
@@ -113,6 +116,8 @@ def generate_launch_description():
             'baud': LaunchConfiguration('esp_baud'),
             'armed': LaunchConfiguration('armed'),
             'max_duty': LaunchConfiguration('max_duty'),
+            'wheel_radius': LaunchConfiguration('wheel_radius'),
+            'wheel_base': LaunchConfiguration('wheel_base'),
         }],
         output='screen',
     )

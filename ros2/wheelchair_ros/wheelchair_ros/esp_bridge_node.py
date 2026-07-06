@@ -14,11 +14,13 @@ The firmware still applies max_duty, ramping, and watchdogs.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from typing import Any, Optional
 
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Quaternion, Twist
+from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
@@ -52,6 +54,16 @@ class EspBridge(Node):
         self.declare_parameter("gain_ang", 0.5)
         self.declare_parameter("joy_v_scale", 1.0)
         self.declare_parameter("joy_w_scale", 1.0)
+        # Odometria por encoder (para EKF/futuro PID). O firmware emite as
+        # contagens acumuladas "enc":[esq,dir] e "enc_cpr" (contagens/rev).
+        self.declare_parameter("publish_wheel_odom", True)
+        self.declare_parameter("wheel_radius", 0.165)   # m — MEDIR/CALIBRAR
+        self.declare_parameter("wheel_base", 0.60)       # m — entre rodas motorizadas
+        self.declare_parameter("enc_left_sign", 1)       # -1 se frente der contagem negativa
+        self.declare_parameter("enc_right_sign", 1)
+        self.declare_parameter("odom_frame", "odom")
+        self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("enc_reset_jump", 100000)  # salto de contagem tratado como reset
 
         self.port = str(self.get_parameter("port").value)
         self.baud = int(self.get_parameter("baud").value)
@@ -65,6 +77,14 @@ class EspBridge(Node):
         self.gain_ang = float(self.get_parameter("gain_ang").value)
         self.joy_v_scale = float(self.get_parameter("joy_v_scale").value)
         self.joy_w_scale = float(self.get_parameter("joy_w_scale").value)
+        self.wheel_odom = _as_bool(self.get_parameter("publish_wheel_odom").value)
+        self.wheel_radius = float(self.get_parameter("wheel_radius").value)
+        self.wheel_base = float(self.get_parameter("wheel_base").value)
+        self.enc_lsign = int(self.get_parameter("enc_left_sign").value)
+        self.enc_rsign = int(self.get_parameter("enc_right_sign").value)
+        self.odom_frame = str(self.get_parameter("odom_frame").value)
+        self.base_frame = str(self.get_parameter("base_frame").value)
+        self.enc_reset_jump = int(self.get_parameter("enc_reset_jump").value)
 
         self._seq = 0
         self._last_v = 0.0
@@ -72,6 +92,13 @@ class EspBridge(Node):
         self._last_cmd_time = 0.0
         self._lock = threading.Lock()
         self._running = True
+
+        # Estado da integração de odometria por encoder
+        self._enc_last: Optional[tuple[float, float]] = None
+        self._enc_time = 0.0
+        self._odom_x = 0.0
+        self._odom_y = 0.0
+        self._odom_yaw = 0.0
 
         self.pub_raw = self.create_publisher(
             String, "wheelchair/telemetry_json", 10)
@@ -81,6 +108,7 @@ class EspBridge(Node):
             Bool, "wheelchair/driving", 10)
         self.pub_bridge_armed = self.create_publisher(
             Bool, "wheelchair/bridge_armed", 10)
+        self.pub_wheel_odom = self.create_publisher(Odometry, "wheel/odom", 10)
 
         self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, 10)
 
@@ -196,8 +224,73 @@ class EspBridge(Node):
             self.pub_fw_armed.publish(Bool(data=bool(pkt.get("armed", False))))
             self.pub_fw_driving.publish(
                 Bool(data=bool(pkt.get("driving", False))))
+            if self.wheel_odom:
+                self._update_wheel_odom(pkt)
         elif pkt.get("type") == "err":
             self.get_logger().warn(f"ESP err: {pkt.get('code')}")
+
+    def _update_wheel_odom(self, pkt: dict[str, Any]) -> None:
+        """Integra a odometria diferencial a partir das contagens de encoder.
+
+        O firmware emite "enc":[esq,dir] (contagens acumuladas, assinadas) e
+        "enc_cpr". Convertemos contagens -> distância por roda, integramos a
+        pose 2D (arco médio) e publicamos /wheel/odom (o EKF usa vx e vyaw)."""
+        enc = pkt.get("enc")
+        cpr = pkt.get("enc_cpr")
+        if not (isinstance(enc, list) and len(enc) >= 2 and cpr):
+            return
+        left = self.enc_lsign * self._as_float(enc[0])
+        right = self.enc_rsign * self._as_float(enc[1])
+        if left is None or right is None:
+            return
+
+        now = time.monotonic()
+        if self._enc_last is None:
+            self._enc_last = (left, right)
+            self._enc_time = now
+            return
+
+        d_left = left - self._enc_last[0]
+        d_right = right - self._enc_last[1]
+        dt = now - self._enc_time
+        self._enc_last = (left, right)
+        self._enc_time = now
+
+        # Reset do microcontrolador: as contagens voltam a ~0, gerando um salto
+        # enorme. Descarta esse delta em vez de contaminar a pose.
+        if (abs(d_left) > self.enc_reset_jump
+                or abs(d_right) > self.enc_reset_jump):
+            self.get_logger().warn("encoder: salto tratado como reset")
+            return
+
+        circ = 2.0 * math.pi * self.wheel_radius
+        ds_l = (d_left / float(cpr)) * circ
+        ds_r = (d_right / float(cpr)) * circ
+        ds = 0.5 * (ds_l + ds_r)
+        dyaw = (ds_r - ds_l) / self.wheel_base if self.wheel_base > 1e-6 else 0.0
+
+        mid = self._odom_yaw + 0.5 * dyaw
+        self._odom_x += ds * math.cos(mid)
+        self._odom_y += ds * math.sin(mid)
+        self._odom_yaw += dyaw
+
+        vx = ds / dt if dt > 1e-6 else 0.0
+        vyaw = dyaw / dt if dt > 1e-6 else 0.0
+        self._publish_wheel_odom(vx, vyaw)
+
+    def _publish_wheel_odom(self, vx: float, vyaw: float) -> None:
+        odom = Odometry()
+        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.frame_id = self.odom_frame
+        odom.child_frame_id = self.base_frame
+        odom.pose.pose.position.x = self._odom_x
+        odom.pose.pose.position.y = self._odom_y
+        half = 0.5 * self._odom_yaw
+        odom.pose.pose.orientation = Quaternion(
+            x=0.0, y=0.0, z=math.sin(half), w=math.cos(half))
+        odom.twist.twist.linear.x = vx
+        odom.twist.twist.angular.z = vyaw
+        self.pub_wheel_odom.publish(odom)
 
     def _publish_joystick_intent(self, pkt: dict[str, Any]) -> None:
         x = self._as_float(pkt.get("x"))
