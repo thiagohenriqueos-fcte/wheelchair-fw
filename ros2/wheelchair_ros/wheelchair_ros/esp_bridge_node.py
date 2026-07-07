@@ -64,6 +64,7 @@ class EspBridge(Node):
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("enc_reset_jump", 100000)  # salto de contagem tratado como reset
+        self.declare_parameter("reset_odom", False)       # set true -> zera a pose acumulada
 
         self.port = str(self.get_parameter("port").value)
         self.baud = int(self.get_parameter("baud").value)
@@ -116,6 +117,10 @@ class EspBridge(Node):
             Float32MultiArray, "wheel/telemetry", 10)
 
         self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, 10)
+
+        # Ajuste ao vivo da calibração de odometria (ros2 param set), para
+        # calibrar wheel_radius/wheel_base e corrigir sinais sem reiniciar.
+        self.add_on_set_parameters_callback(self._on_params)
 
         self.get_logger().info(f"abrindo ESP em {self.port} @ {self.baud}")
         try:
@@ -302,6 +307,32 @@ class EspBridge(Node):
         odom.twist.twist.linear.x = vx
         odom.twist.twist.angular.z = vyaw
         self.pub_wheel_odom.publish(odom)
+
+    def _reset_odom(self) -> None:
+        self._enc_last = None
+        self._odom_x = self._odom_y = self._odom_yaw = 0.0
+        self._dist_l = self._dist_r = 0.0
+
+    def _on_params(self, params):
+        from rcl_interfaces.msg import SetParametersResult
+        for p in params:
+            v = p.value
+            if p.name == "wheel_radius":
+                self.wheel_radius = float(v)
+            elif p.name == "wheel_base":
+                self.wheel_base = float(v)
+            elif p.name == "enc_left_sign":
+                self.enc_lsign = int(v)
+                self._enc_last = None   # re-baseline: o sinal mudou
+            elif p.name == "enc_right_sign":
+                self.enc_rsign = int(v)
+                self._enc_last = None
+            elif p.name == "max_duty":
+                self.max_duty = float(v)
+            elif p.name == "reset_odom" and _as_bool(v):
+                self._reset_odom()
+                self.get_logger().info("odometria zerada")
+        return SetParametersResult(successful=True)
 
     def _publish_joystick_intent(self, pkt: dict[str, Any]) -> None:
         x = self._as_float(pkt.get("x"))
