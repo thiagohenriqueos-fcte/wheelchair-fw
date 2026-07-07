@@ -115,6 +115,10 @@ class EspBridge(Node):
         # [dist_l, dist_r, vel_l, vel_r] — para calibração e futuro PID.
         self.pub_wheel_tel = self.create_publisher(
             Float32MultiArray, "wheel/telemetry", 10)
+        # Estado do PID de roda do firmware (fw >= 0.9), para tuning:
+        # [sp_l, sp_r, vel_l, vel_r, err_l, err_r, out_l, out_r] em rad/s.
+        self.pub_pid_state = self.create_publisher(
+            Float32MultiArray, "wheel/pid_state", 10)
 
         self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, 10)
 
@@ -236,8 +240,27 @@ class EspBridge(Node):
                 Bool(data=bool(pkt.get("driving", False))))
             if self.wheel_odom:
                 self._update_wheel_odom(pkt)
+            self._publish_pid_state(pkt)
         elif pkt.get("type") == "err":
             self.get_logger().warn(f"ESP err: {pkt.get('code')}")
+
+    def _publish_pid_state(self, pkt: dict[str, Any]) -> None:
+        """Republica o estado do PID de roda (fw >= 0.9) para tuning."""
+        sp = pkt.get("wheel_sp_rad_s")
+        vel = pkt.get("wheel_vel_rad_s")
+        if not (isinstance(sp, list) and isinstance(vel, list)):
+            return  # firmware antigo (sem PID) — nada a publicar
+        err = pkt.get("wheel_err_rad_s") or [0.0, 0.0]
+        out = pkt.get("wheel_pid_out") or [0.0, 0.0]
+
+        def pair(a):
+            try:
+                return [float(a[0]), float(a[1])]
+            except (TypeError, ValueError, IndexError):
+                return [0.0, 0.0]
+
+        data = pair(sp) + pair(vel) + pair(err) + pair(out)
+        self.pub_pid_state.publish(Float32MultiArray(data=data))
 
     def _update_wheel_odom(self, pkt: dict[str, Any]) -> None:
         """Integra a odometria diferencial a partir das contagens de encoder.
