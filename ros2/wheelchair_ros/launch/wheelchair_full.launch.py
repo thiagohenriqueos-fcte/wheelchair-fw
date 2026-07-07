@@ -69,9 +69,10 @@ def generate_launch_description():
         DeclareLaunchArgument('min_obstacle_range', default_value='0.20'),
         DeclareLaunchArgument('esp_port', default_value='/dev/wheelchair/esp32'),
         DeclareLaunchArgument('esp_baud', default_value='460800'),
-        # Odometria por encoder (alimenta o EKF / futuro PID). MEDIR wheel_radius.
-        DeclareLaunchArgument('wheel_radius', default_value='0.165'),
-        DeclareLaunchArgument('wheel_base', default_value='0.60'),
+        # Odometria por encoder (alimenta o EKF). Calibrado em bancada:
+        # wheel_radius por empurrão de 3 m; wheel_base por 3 voltas (1080°).
+        DeclareLaunchArgument('wheel_radius', default_value='0.293'),
+        DeclareLaunchArgument('wheel_base', default_value='0.522'),
         # Com o firmware fw 0.9.x (encoder esquerdo nos GPIO 18/19), ambas as
         # rodas contam NEGATIVO para frente -> invertemos os dois (bancada).
         DeclareLaunchArgument('enc_left_sign', default_value='-1'),
