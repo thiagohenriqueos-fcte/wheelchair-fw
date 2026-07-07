@@ -72,9 +72,9 @@ def generate_launch_description():
         # Odometria por encoder (alimenta o EKF / futuro PID). MEDIR wheel_radius.
         DeclareLaunchArgument('wheel_radius', default_value='0.165'),
         DeclareLaunchArgument('wheel_base', default_value='0.60'),
-        # Encoder direito é montado espelhado nesta cadeira: frente -> contagem
-        # negativa, então invertemos o sinal (validado em bancada).
-        DeclareLaunchArgument('enc_left_sign', default_value='1'),
+        # Com o firmware fw 0.9.x (encoder esquerdo nos GPIO 18/19), ambas as
+        # rodas contam NEGATIVO para frente -> invertemos os dois (bancada).
+        DeclareLaunchArgument('enc_left_sign', default_value='-1'),
         DeclareLaunchArgument('enc_right_sign', default_value='-1'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/wheelchair/lidar'),
         DeclareLaunchArgument('lidar_baud', default_value='460800',
