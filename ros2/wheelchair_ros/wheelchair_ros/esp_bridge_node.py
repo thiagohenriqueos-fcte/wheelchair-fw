@@ -43,7 +43,7 @@ class EspBridge(Node):
         super().__init__("esp_bridge")
 
         self.declare_parameter("port", "/dev/ttyUSB1")
-        self.declare_parameter("baud", 115200)
+        self.declare_parameter("baud", 460800)  # firmware >= 0.9.x usa 460800
         self.declare_parameter("cmd_rate_hz", 20.0)
         self.declare_parameter("cmd_timeout_s", 0.30)
         self.declare_parameter("armed", False)

@@ -68,7 +68,7 @@ def generate_launch_description():
         DeclareLaunchArgument('cone_half_deg', default_value='20.0'),
         DeclareLaunchArgument('min_obstacle_range', default_value='0.20'),
         DeclareLaunchArgument('esp_port', default_value='/dev/wheelchair/esp32'),
-        DeclareLaunchArgument('esp_baud', default_value='115200'),
+        DeclareLaunchArgument('esp_baud', default_value='460800'),
         # Odometria por encoder (alimenta o EKF / futuro PID). MEDIR wheel_radius.
         DeclareLaunchArgument('wheel_radius', default_value='0.165'),
         DeclareLaunchArgument('wheel_base', default_value='0.60'),
