@@ -54,6 +54,13 @@ class EspBridge(Node):
         self.declare_parameter("gain_ang", 0.5)
         self.declare_parameter("joy_v_scale", 1.0)
         self.declare_parameter("joy_w_scale", 1.0)
+        # Mapeamento dos eixos do joystick do ESP -> Twist (REP-103). Mapeado em
+        # bancada: avanço no eixo X (0, +), giro no eixo Y (1; direita = y neg).
+        # Índice do eixo: 0 = x do ESP, 1 = y do ESP (evita "Norway problem").
+        self.declare_parameter("joy_v_axis", 0)
+        self.declare_parameter("joy_v_sign", 1.0)
+        self.declare_parameter("joy_w_axis", 1)
+        self.declare_parameter("joy_w_sign", 1.0)
         # Odometria por encoder (para EKF/futuro PID). O firmware emite as
         # contagens acumuladas "enc":[esq,dir] e "enc_cpr" (contagens/rev).
         self.declare_parameter("publish_wheel_odom", True)
@@ -78,6 +85,10 @@ class EspBridge(Node):
         self.gain_ang = float(self.get_parameter("gain_ang").value)
         self.joy_v_scale = float(self.get_parameter("joy_v_scale").value)
         self.joy_w_scale = float(self.get_parameter("joy_w_scale").value)
+        self.joy_v_axis = int(self.get_parameter("joy_v_axis").value)
+        self.joy_v_sign = float(self.get_parameter("joy_v_sign").value)
+        self.joy_w_axis = int(self.get_parameter("joy_w_axis").value)
+        self.joy_w_sign = float(self.get_parameter("joy_w_sign").value)
         self.wheel_odom = _as_bool(self.get_parameter("publish_wheel_odom").value)
         self.wheel_radius = float(self.get_parameter("wheel_radius").value)
         self.wheel_base = float(self.get_parameter("wheel_base").value)
@@ -362,9 +373,12 @@ class EspBridge(Node):
         y = self._as_float(pkt.get("y"))
         if x is None or y is None:
             return
+        axes = (x, y)
+        v_raw = axes[self.joy_v_axis] if self.joy_v_axis in (0, 1) else y
+        w_raw = axes[self.joy_w_axis] if self.joy_w_axis in (0, 1) else x
         msg = Twist()
-        msg.linear.x = self.joy_v_scale * y
-        msg.angular.z = -self.joy_w_scale * x
+        msg.linear.x = self.joy_v_scale * self.joy_v_sign * v_raw
+        msg.angular.z = self.joy_w_scale * self.joy_w_sign * w_raw
         self.pub_joy_cmd.publish(msg)
 
     @staticmethod

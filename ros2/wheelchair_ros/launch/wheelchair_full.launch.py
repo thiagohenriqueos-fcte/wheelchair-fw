@@ -77,6 +77,12 @@ def generate_launch_description():
         # rodas contam NEGATIVO para frente -> invertemos os dois (bancada).
         DeclareLaunchArgument('enc_left_sign', default_value='-1'),
         DeclareLaunchArgument('enc_right_sign', default_value='-1'),
+        # Eixos do joystick do ESP -> Twist (bancada: avanço=X+, giro=Y).
+        # Índice: 0 = eixo X do ESP, 1 = eixo Y do ESP.
+        DeclareLaunchArgument('joy_v_axis', default_value='0'),
+        DeclareLaunchArgument('joy_v_sign', default_value='1.0'),
+        DeclareLaunchArgument('joy_w_axis', default_value='1'),
+        DeclareLaunchArgument('joy_w_sign', default_value='1.0'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/wheelchair/lidar'),
         DeclareLaunchArgument('lidar_baud', default_value='460800',
                               description='C1: 460800, A1M8: 115200'),
@@ -125,6 +131,10 @@ def generate_launch_description():
             'wheel_base': LaunchConfiguration('wheel_base'),
             'enc_left_sign': LaunchConfiguration('enc_left_sign'),
             'enc_right_sign': LaunchConfiguration('enc_right_sign'),
+            'joy_v_axis': LaunchConfiguration('joy_v_axis'),
+            'joy_v_sign': LaunchConfiguration('joy_v_sign'),
+            'joy_w_axis': LaunchConfiguration('joy_w_axis'),
+            'joy_w_sign': LaunchConfiguration('joy_w_sign'),
         }],
         output='screen',
     )
