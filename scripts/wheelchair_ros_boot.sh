@@ -4,7 +4,9 @@
 # Faz o source do ROS e dos dois workspaces e sobe o launch unificado. Os
 # argumentos do launch vêm de WHEELCHAIR_LAUNCH_ARGS (ver systemd/wheelchair-ros.env);
 # o default é conservador: navegação ligada, porém DESARMADO (não move o motor).
-set -euo pipefail
+#
+# NÃO usar 'set -u': os setup.bash do ROS referenciam variáveis não definidas
+# (AMENT_TRACE_SETUP_FILES, COLCON_TRACE, ...) e quebrariam o source no systemd.
 
 source /opt/ros/jazzy/setup.bash
 source /home/wheelchair/dev_ws/install/setup.bash
