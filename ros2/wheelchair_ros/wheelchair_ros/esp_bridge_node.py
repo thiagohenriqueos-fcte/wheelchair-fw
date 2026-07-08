@@ -214,17 +214,39 @@ class EspBridge(Node):
         line = json.dumps(packet, separators=(",", ":")) + "\n"
         try:
             self.ser.write(line.encode("ascii"))
-        except serial.SerialException as exc:
-            self.get_logger().error(f"falha na escrita serial: {exc}")
+        except (serial.SerialException, OSError) as exc:
+            self.get_logger().error(
+                f"falha na escrita serial: {exc}", throttle_duration_sec=2.0)
+
+    def _reopen_serial(self) -> None:
+        """Reabre a porta (o symlink /dev/wheelchair/esp32 segue o novo ttyUSB
+        quando o ESP re-enumera por glitch/brownout de USB)."""
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+        try:
+            try:
+                self.ser = serial.Serial(
+                    self.port, self.baud, timeout=0.1, exclusive=True)
+            except TypeError:
+                self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.ser.reset_input_buffer()
+            self.get_logger().info(f"serial reconectada em {self.port}")
+        except (serial.SerialException, OSError) as exc:
+            self.get_logger().warn(
+                f"reconexao serial falhou: {exc}", throttle_duration_sec=2.0)
 
     def _read_loop(self) -> None:
         buf = b""
         while self._running and rclpy.ok():
             try:
                 chunk = self.ser.read(256)
-            except serial.SerialException as exc:
-                self.get_logger().error(f"falha na leitura serial: {exc}")
+            except (serial.SerialException, OSError) as exc:
+                self.get_logger().error(
+                    f"falha na leitura serial: {exc}", throttle_duration_sec=2.0)
                 time.sleep(0.5)
+                self._reopen_serial()
                 continue
             if not chunk:
                 continue
