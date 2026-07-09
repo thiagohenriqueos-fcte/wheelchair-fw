@@ -53,6 +53,10 @@ class SharedControl(Node):
         self.declare_parameter("assist_gain", 0.8)
         self.declare_parameter("allow_reverse", True)
         self.declare_parameter("reverse_speed_cap", 0.5)
+        # Zona morta do giro: |w| abaixo disto vira 0. Evita o "giro fantasma"
+        # ao parar (o eixo X vaza um w pequeno quando se empurra reto p/ frente);
+        # um giro deliberado fica acima e ainda passa p/ esterçar/sair.
+        self.declare_parameter("turn_deadzone", 0.15)
         self.declare_parameter("scan_timeout_s", 0.40)
         self.declare_parameter("intent_timeout_s", 0.40)
         self.declare_parameter("control_rate_hz", 20.0)
@@ -71,6 +75,7 @@ class SharedControl(Node):
         self.assist_gain = float(gp("assist_gain").value)
         self.allow_reverse = _as_bool(gp("allow_reverse").value)
         self.rev_cap = float(gp("reverse_speed_cap").value)
+        self.turn_deadzone = float(gp("turn_deadzone").value)
         self.scan_timeout = float(gp("scan_timeout_s").value)
         self.intent_timeout = float(gp("intent_timeout_s").value)
         rate = float(gp("control_rate_hz").value)
@@ -118,6 +123,8 @@ class SharedControl(Node):
                 self.dev_max = math.radians(float(v))
             elif p.name == "assist_gain":
                 self.assist_gain = float(v)
+            elif p.name == "turn_deadzone":
+                self.turn_deadzone = float(v)
         return SetParametersResult(successful=True)
 
     def _on_scan(self, msg: LaserScan) -> None:
@@ -138,16 +145,21 @@ class SharedControl(Node):
             self._publish(0.0, 0.0, "sem_intencao")
             return
 
+        # Zona morta do giro: mata o resíduo do eixo X (evita giro fantasma ao
+        # parar) mas deixa passar um giro deliberado.
+        w_user = self._w_user
+        if abs(w_user) < self.turn_deadzone:
+            w_user = 0.0
+
         if self._scan is None or (now - self._scan_time) > self.scan_timeout:
             v = min(0.0, self._v_user) if self.allow_reverse else 0.0
-            self._publish(v, self._w_user, "sem_scan")
+            self._publish(v, w_user, "sem_scan")
             self.get_logger().warn(
                 "sem /scan recente; bloqueando avanco",
                 throttle_duration_sec=2.0)
             return
 
         v_user = self._v_user
-        w_user = self._w_user
 
         if v_user < 0.0:
             v = v_user * (_clamp(self.rev_cap, 0.0, 1.0)

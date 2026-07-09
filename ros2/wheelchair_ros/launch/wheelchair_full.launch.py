@@ -60,7 +60,7 @@ def generate_launch_description():
         DeclareLaunchArgument('max_duty', default_value='0.20'),
         DeclareLaunchArgument('assist_gain', default_value='0.0',
                               description='Ganho de desvio (0 = só freio/parada)'),
-        DeclareLaunchArgument('stop_distance', default_value='0.45'),
+        DeclareLaunchArgument('stop_distance', default_value='0.60'),
         DeclareLaunchArgument('slow_distance', default_value='1.10'),
         # Calibrado em bancada p/ esta montagem do LIDAR (frente do chassi ~149°
         # no referencial do sensor). A estrutura da cadeira fica fora do cone.
@@ -77,12 +77,15 @@ def generate_launch_description():
         # rodas contam NEGATIVO para frente -> invertemos os dois (bancada).
         DeclareLaunchArgument('enc_left_sign', default_value='-1'),
         DeclareLaunchArgument('enc_right_sign', default_value='-1'),
-        # Eixos do joystick do ESP -> Twist (bancada: avanço=X+, giro=Y).
-        # Índice: 0 = eixo X do ESP, 1 = eixo Y do ESP.
-        DeclareLaunchArgument('joy_v_axis', default_value='0'),
-        DeclareLaunchArgument('joy_v_sign', default_value='1.0'),
-        DeclareLaunchArgument('joy_w_axis', default_value='1'),
-        DeclareLaunchArgument('joy_w_sign', default_value='1.0'),
+        # Eixos do joystick do ESP -> Twist. Validado em bancada (2026-07-09):
+        # avanço no eixo Y (índice 1, frente = y NEGATIVO -> sinal -1) e giro no
+        # eixo X (índice 0, sinal -1 p/ direita = nariz à direita). O joystick
+        # tinha sido religado/girado; este é o mapa correto p/ a montagem atual.
+        # Índice do eixo: 0 = X do ESP, 1 = Y do ESP.
+        DeclareLaunchArgument('joy_v_axis', default_value='1'),
+        DeclareLaunchArgument('joy_v_sign', default_value='-1.0'),
+        DeclareLaunchArgument('joy_w_axis', default_value='0'),
+        DeclareLaunchArgument('joy_w_sign', default_value='-1.0'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/wheelchair/lidar'),
         DeclareLaunchArgument('lidar_baud', default_value='460800',
                               description='C1: 460800, A1M8: 115200'),

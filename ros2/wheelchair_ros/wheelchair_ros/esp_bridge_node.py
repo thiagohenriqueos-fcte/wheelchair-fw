@@ -68,6 +68,11 @@ class EspBridge(Node):
         self.declare_parameter("wheel_base", 0.60)       # m — entre rodas motorizadas
         self.declare_parameter("enc_left_sign", 1)       # -1 se frente der contagem negativa
         self.declare_parameter("enc_right_sign", 1)
+        # Sinal de SAÍDA por motor (fiação). +1 normal; -1 se o motor gira ao
+        # contrário. Se um motor estiver invertido, "frente" (v) faz a cadeira
+        # girar e "giro" (w) faz ela andar reto -> corrija aqui (ao vivo).
+        self.declare_parameter("motor_left_sign", 1)
+        self.declare_parameter("motor_right_sign", 1)
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("enc_reset_jump", 100000)  # salto de contagem tratado como reset
@@ -94,6 +99,8 @@ class EspBridge(Node):
         self.wheel_base = float(self.get_parameter("wheel_base").value)
         self.enc_lsign = int(self.get_parameter("enc_left_sign").value)
         self.enc_rsign = int(self.get_parameter("enc_right_sign").value)
+        self.motor_lsign = int(self.get_parameter("motor_left_sign").value)
+        self.motor_rsign = int(self.get_parameter("motor_right_sign").value)
         self.odom_frame = str(self.get_parameter("odom_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.enc_reset_jump = int(self.get_parameter("enc_reset_jump").value)
@@ -201,8 +208,8 @@ class EspBridge(Node):
     def _send_drive_cmd(self, left: float, right: float) -> None:
         self._write({
             "type": "drive_cmd",
-            "left": round(left, 3),
-            "right": round(right, 3),
+            "left": round(self.motor_lsign * left, 3),
+            "right": round(self.motor_rsign * right, 3),
         })
 
     def _send_stop(self) -> None:
@@ -383,6 +390,18 @@ class EspBridge(Node):
             elif p.name == "enc_right_sign":
                 self.enc_rsign = int(v)
                 self._enc_last = None
+            elif p.name == "motor_left_sign":
+                self.motor_lsign = int(v)
+            elif p.name == "motor_right_sign":
+                self.motor_rsign = int(v)
+            elif p.name == "joy_v_axis":
+                self.joy_v_axis = int(v)
+            elif p.name == "joy_v_sign":
+                self.joy_v_sign = float(v)
+            elif p.name == "joy_w_axis":
+                self.joy_w_axis = int(v)
+            elif p.name == "joy_w_sign":
+                self.joy_w_sign = float(v)
             elif p.name == "max_duty":
                 self.max_duty = float(v)
             elif p.name == "reset_odom" and _as_bool(v):
