@@ -29,12 +29,16 @@ Exemplos:
 """
 import os
 
+import lifecycle_msgs.msg
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
 from launch.conditions import IfCondition
+from launch.events import matches_action
 from launch.substitutions import Command, LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import LifecycleNode, Node
+from launch_ros.event_handlers import OnStateTransition
+from launch_ros.events.lifecycle import ChangeState
 from launch_ros.parameter_descriptions import ParameterValue
 
 
@@ -198,15 +202,42 @@ def generate_launch_description():
         output='screen',
     )
 
-    slam = Node(
+    # No Jazzy o async_slam_toolbox_node e um LifecycleNode: se ninguem emitir
+    # as transicoes ele sobe em 'unconfigured' e nunca cria o subscriber de
+    # /scan nem o publisher de /map (fica vivo, porem inerte). Declaramos como
+    # LifecycleNode e emitimos configure -> activate (padrao do proprio pacote).
+    slam = LifecycleNode(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
         name='slam_toolbox',
+        namespace='',
         condition=IfCondition(nav),
         parameters=[slam_yaml],
         output='screen',
     )
 
+    slam_configure = EmitEvent(
+        condition=IfCondition(nav),
+        event=ChangeState(
+            lifecycle_node_matcher=matches_action(slam),
+            transition_id=lifecycle_msgs.msg.Transition.TRANSITION_CONFIGURE,
+        ),
+    )
+
+    # Assim que terminar de configurar (configuring -> inactive), ativa.
+    slam_activate = RegisterEventHandler(
+        OnStateTransition(
+            target_lifecycle_node=slam,
+            start_state='configuring',
+            goal_state='inactive',
+            entities=[EmitEvent(event=ChangeState(
+                lifecycle_node_matcher=matches_action(slam),
+                transition_id=lifecycle_msgs.msg.Transition.TRANSITION_ACTIVATE,
+            ))],
+        ),
+    )
+
     return LaunchDescription(args + [
-        rsp, lidar, esp_bridge, shared_control, witmotion, rf2o, ekf, slam,
+        rsp, lidar, esp_bridge, shared_control, witmotion, rf2o, ekf,
+        slam_activate, slam, slam_configure,
     ])
