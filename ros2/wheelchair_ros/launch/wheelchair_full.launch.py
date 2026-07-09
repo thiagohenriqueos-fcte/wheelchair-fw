@@ -66,11 +66,17 @@ def generate_launch_description():
                               description='Ganho de desvio (0 = só freio/parada)'),
         DeclareLaunchArgument('stop_distance', default_value='0.60'),
         DeclareLaunchArgument('slow_distance', default_value='1.10'),
-        # Calibrado em bancada p/ esta montagem do LIDAR (frente do chassi ~149°
-        # no referencial do sensor). A estrutura da cadeira fica fora do cone.
-        DeclareLaunchArgument('front_offset_deg', default_value='149.0'),
-        DeclareLaunchArgument('cone_half_deg', default_value='20.0'),
-        DeclareLaunchArgument('min_obstacle_range', default_value='0.20'),
+        # Geometria do LIDAR no base_link (centro do eixo traseiro). O cone
+        # angular antigo (front_offset_deg) era estruturalmente errado: com o
+        # sensor 33,6 cm fora do eixo, nenhum angulo unico representa "a frente",
+        # e a metade direita da cadeira ficava cega. Ver shared_control_node.
+        # Calibrado 2026-07-09: laser_x por 3 metodos (±1,3 cm); laser_yaw por
+        # ajuste de reta em 2 paredes (±0,25°); laser_y por trilateracao.
+        DeclareLaunchArgument('laser_x', default_value='0.667'),
+        DeclareLaunchArgument('laser_y', default_value='0.336'),
+        DeclareLaunchArgument('laser_yaw_deg', default_value='-155.22'),
+        DeclareLaunchArgument('corridor_half_width', default_value='0.305'),
+        DeclareLaunchArgument('front_extent', default_value='0.667'),
         DeclareLaunchArgument('esp_port', default_value='/dev/wheelchair/esp32'),
         DeclareLaunchArgument('esp_baud', default_value='460800'),
         # Odometria por encoder (alimenta o EKF). Calibrado em bancada:
@@ -155,9 +161,11 @@ def generate_launch_description():
             'assist_gain': LaunchConfiguration('assist_gain'),
             'stop_distance': LaunchConfiguration('stop_distance'),
             'slow_distance': LaunchConfiguration('slow_distance'),
-            'front_offset_deg': LaunchConfiguration('front_offset_deg'),
-            'cone_half_deg': LaunchConfiguration('cone_half_deg'),
-            'min_obstacle_range': LaunchConfiguration('min_obstacle_range'),
+            'laser_x': LaunchConfiguration('laser_x'),
+            'laser_y': LaunchConfiguration('laser_y'),
+            'laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+            'corridor_half_width': LaunchConfiguration('corridor_half_width'),
+            'front_extent': LaunchConfiguration('front_extent'),
         }],
         output='screen',
     )
