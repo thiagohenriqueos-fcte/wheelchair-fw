@@ -1,0 +1,24 @@
+# /etc/udev/rules.d/99-wheelchair.rules
+#
+# Cria symlinks estaveis para os tres seriais da cadeira de rodas,
+# independente da ordem em que o kernel enumera os ttyXXX.
+#
+# Instalar:
+#   sudo cp 99-wheelchair.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   ls -l /dev/wheelchair/
+
+# IMU IWT603T (adaptador NATIONS N32L40x, USB-CDC)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="19f5", ATTRS{idProduct}=="5740", \
+    SYMLINK+="wheelchair/imu", MODE="0666"
+
+# ESP32 com chip CH343 (1a86) — filtrado pelo NUMERO DE SERIE para
+# nao colidir com qualquer outro dispositivo do mesmo fabricante
+# (CH340/CH341/CH9102 todos compartilham VID 1a86).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{serial}=="5C37205811", \
+    SYMLINK+="wheelchair/esp32", MODE="0666"
+
+# RPLIDAR A1M8 (adaptador Silicon Labs CP2102 da Slamtec).
+# Se um dia voce tiver outro CP2102 plugado, adicione ATTRS{serial}==...
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+    SYMLINK+="wheelchair/lidar", MODE="0666"

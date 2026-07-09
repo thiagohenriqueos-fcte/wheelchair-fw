@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  URDF minimo da cadeira de rodas — define apenas os frames necessarios
+  para que o TF tree funcione corretamente. Sem geometria visual ainda
+  (vira depois). Tudo que importa nesta fase: posicoes relativas do IMU
+  e do LiDAR em relacao ao base_link.
+
+  Convencao ROS (REP-103): x para frente, y para esquerda, z para cima;
+  rotacoes em rad. Os offsets abaixo sao placeholders — meca e ajuste
+  no robo real antes da fusao sensorial.
+
+  base_link e o centro do eixo traseiro (entre as rodas motorizadas).
+-->
+<robot name="wheelchair" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ============================================================
+       Parametros (ajuste aqui — meca no robo real)
+       ============================================================ -->
+  <xacro:property name="imu_x"   value="0.10"/>   <!-- IMU 10 cm na frente do eixo -->
+  <xacro:property name="imu_y"   value="0.00"/>
+  <xacro:property name="imu_z"   value="0.25"/>   <!-- 25 cm acima do solo -->
+
+  <xacro:property name="lidar_x" value="0.667"/>  <!-- LiDAR 66,7 cm a frente do eixo (calib. 2026-07-09) -->
+  <xacro:property name="lidar_y" value="0.336"/>  <!-- 33,6 cm a ESQUERDA do eixo central -->
+  <xacro:property name="lidar_z" value="0.15"/>   <!-- 15 cm acima do solo (medido) -->
+  <!-- Yaw de montagem: o zero do sensor nao aponta p/ a frente do chassi.
+       -155.22 deg, obtido por ajuste de reta em duas paredes (+-0.25 deg). -->
+  <xacro:property name="lidar_yaw" value="-2.70914"/>
+
+  <!-- ============================================================
+       base_link — centro do eixo traseiro
+       ============================================================ -->
+  <link name="base_link"/>
+
+  <!-- base_footprint na altura do chao (necessario para Nav2 depois) -->
+  <link name="base_footprint"/>
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================================================
+       IMU IWT603T
+       Confirme a ORIENTACAO real de montagem. Se o conector do
+       sensor aponta para tras, talvez voce precise de uma rotacao
+       em yaw (ex.: rpy="0 0 3.14159") para que +X do IMU coincida
+       com +X do base_link. Sem isso, o EKF mistura eixos.
+       ============================================================ -->
+  <link name="imu_link"/>
+  <joint name="base_link_to_imu" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="${imu_x} ${imu_y} ${imu_z}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================================================
+       RPLIDAR A1M8
+       O sllidar_ros2 publica /scan com frame "laser" por default;
+       o launch sobrescreve para "base_laser" para casar com este
+       URDF. Se o LiDAR estiver montado de cabeca para baixo, ajuste
+       rpy="3.14159 0 0".
+       ============================================================ -->
+  <link name="base_laser"/>
+  <joint name="base_link_to_laser" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_laser"/>
+    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z}" rpy="0 0 ${lidar_yaw}"/>
+  </joint>
+
+</robot>

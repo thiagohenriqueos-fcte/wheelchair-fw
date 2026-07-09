@@ -1,0 +1,28 @@
+# Parametros do no ponte serial (wheelchair_bridge).
+# Sobrescritos no launch via --ros-args.
+wheelchair_bridge:
+  ros__parameters:
+    # Porta do ESP32. Use o symlink udev /dev/wheelchair/esp32 quando
+    # as regras estiverem instaladas; durante testes vale usar o nome
+    # cru (ex.: /dev/ttyACM1). O firmware atual roda em USB-CDC, entao
+    # o baud configurado do lado do PC e indiferente — o valor abaixo
+    # serve so para evitar warning da pyserial.
+    port: /dev/wheelchair/esp32
+    baud: 115200
+
+    # Distancia entre as rodas motorizadas em metros — CALIBRE.
+    # Para calibrar: gire a cadeira 360 graus no lugar com a odometria
+    # rodando, e ajuste ate o yaw integrado bater com a volta real.
+    # Se a cadeira "fechar" mais que 360, aumente; se "fechar" menos,
+    # diminua. O valor abaixo (0.60 m) e o mesmo do monitor matplotlib.
+    wheel_base: 0.60
+
+    odom_frame: odom
+    base_frame: base_link
+    joy_max: 1.0
+
+    # O firmware emite distancias acumuladas (DL/DR crescem indefini-
+    # damente). Se reiniciar, voltam a 0 — isso bateria a pose dezenas
+    # de metros para tras. Saltos absolutos acima do valor abaixo (em
+    # metros) sao tratados como reset.
+    reset_jump_m: 0.30

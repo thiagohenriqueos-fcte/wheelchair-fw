@@ -1,0 +1,84 @@
+# robot_localization — EKF para a cadeira de rodas.
+#
+# Estrategia: diff drive 2D classico.
+#   * Da ODOMETRIA das rodas (/wheel/odom) usamos APENAS vx e vyaw.
+#     A pose acumulada do encoder e ruim em curva (escorrega) — entao
+#     deixamos o EKF re-integrar as velocidades.
+#   * Do IMU (/imu_data) usamos APENAS vyaw (giroscopio).
+#     NAO usamos o yaw absoluto: o IWT603T integra o gyro sem magneto-
+#     metro confiavel indoor, entao a orientacao publicada deriva. Yaw
+#     com drift contamina a fusao. O vyaw e excelente — bem melhor
+#     que o derivado da diferenca dos encoders.
+#   * NAO usamos ax/ay: para uma cadeira a 1.0-1.5 m/s indoor, integrar
+#     aceleracao introduz mais ruido do que sinal. Encoders ganham.
+#
+# Saida: /odometry/filtered + TF odom->base_link (~30 Hz).
+
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # ----------- Fonte 0: odometria das rodas -----------
+    odom0: /wheel/odom
+    # Ordem do vetor (15): x,y,z, roll,pitch,yaw, vx,vy,vz, vroll,vpitch,vyaw, ax,ay,az
+    # Pegamos so vx e vyaw. Tudo o mais false.
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # ----------- Fonte 1: odometria a laser (rf2o) -----------
+    # Sem encoders, e o rf2o que da a translacao (vx). Tambem usamos vyaw.
+    odom1: /odom_rf2o
+    odom1_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom1_differential: false
+    odom1_relative: false
+    odom1_queue_size: 10
+
+    # ----------- Fonte 2: IMU IWT603T -----------
+    imu0: /imu_data
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: false  # nao usamos ax/ay aqui
+
+    # Covariancia inicial do processo — defaults conservadores do
+    # robot_localization. Para cadeira a 1.5 m/s nao precisamos
+    # apertar. Se a pose ficar muito "lenta" para responder, reduza
+    # process_noise_covariance para [0,0] e [35,35].
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025,0.0,0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.025,0.0,0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.04,0.0,  0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.01, 0.0,  0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.01, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.02, 0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.01,0.0, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.01,0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 0.015]
