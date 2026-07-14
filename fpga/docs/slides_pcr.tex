@@ -550,36 +550,49 @@ computação.
 \end{frame}
 
 % =============================================================================
-\begin{frame}{Block design: ARM + AXI-DMA + acelerador \hfill [VIVADO]}
+\begin{frame}{Block design: ARM + AXI-DMA + acelerador}
 \begin{center}
 \begin{tikzpicture}[font=\scriptsize, node distance=10mm,
-  blk/.style={draw, rounded corners=2pt, minimum height=13mm, minimum width=26mm,
+  blk/.style={draw, rounded corners=2pt, minimum height=12mm, minimum width=25mm,
               align=center, inner sep=4pt},
   arr/.style={-Latex, thick}]
   \node[blk, fill=green!12] (ps) {\textbf{Zynq PS}\\ARM Cortex-A9\\\scriptsize DDR: /scan};
-  \node[blk, right=22mm of ps, fill=blue!12] (dma) {\textbf{AXI-DMA}};
-  \node[blk, right=18mm of dma, fill=orange!18] (acc) {\textbf{lidar\_accel}\\\scriptsize CORDIC + 19 pistas};
+  \node[blk, right=20mm of ps, fill=blue!12] (dma) {\textbf{AXI-DMA}};
+  \node[blk, right=16mm of dma, fill=orange!18] (acc) {\textbf{lidar\_accel}\\\scriptsize CORDIC + 19 pistas};
   \draw[arr] (ps) -- node[above, font=\tiny] {AXI4-Lite} node[below, font=\tiny] {(GP0)} (dma);
   \draw[arr] (dma) -- node[above, font=\tiny] {AXI4-Stream} (acc);
-  \draw[arr] (ps.south) -- ++(0,-7mm) -| node[pos=0.25, below, font=\tiny] {AXI4-Lite: calibração + 19 folgas} (acc.south);
-  \draw[arr, red] (acc.north) -- ++(0,7mm) -| node[pos=0.25, above, font=\tiny] {IRQ} (ps.north);
+  \draw[arr] (ps.south) -- ++(0,-6mm) -| node[pos=0.25, below, font=\tiny] {AXI4-Lite: calibração + 19 folgas} (acc.south);
+  \draw[arr, red] (acc.north) -- ++(0,6mm) -| node[pos=0.25, above, font=\tiny] {IRQ} (ps.north);
 \end{tikzpicture}
 \end{center}
 
-\vspace{3mm}
+\vspace{2mm}
 \footnotesize
-\begin{itemize}
+\begin{itemize}\footnotesize
 \item O ARM guarda a varredura na \textbf{DDR}; o \textbf{AXI-DMA} a transmite como
-      \emph{stream} ao acelerador
+      \emph{stream} ao acelerador (via \texttt{S\_AXI\_HP0})
 \item Resultado (19 folgas) volta por \textbf{AXI4-Lite}; a \textbf{IRQ} avisa o fim
       --- sem espera ocupada
 \item \emph{Stream} para o fluxo volumoso; mapeado em memória para os escalares.
 \end{itemize}
-
-\vspace{2mm}
-\centering
-\alert{\scriptsize [COLAR AQUI: print do block design do Vivado]}
 \end{frame}
+
+% =============================================================================
+% Slide com o print REAL do Vivado. Copie vivado/reports/block_design.png para
+% docs/figs/ e ele aparece automaticamente; sem o arquivo, o slide é pulado.
+\IfFileExists{figs/block_design.png}{%
+\begin{frame}{Block design no Vivado}
+\begin{center}
+\includegraphics[width=0.92\textwidth, height=0.72\textheight, keepaspectratio]%
+  {figs/block_design.png}
+\end{center}
+\centering\tiny
+\texttt{zynq} $\to$ \texttt{zynq\_axi\_periph} (AXI4-Lite) $\to$ \texttt{dma} e
+\texttt{accel} \quad$\vert$\quad
+\texttt{dma/M\_AXIS\_MM2S} $\to$ \texttt{accel/s\_axis} (AXI4-Stream)
+\quad$\vert$\quad
+\texttt{accel/irq} $\to$ \texttt{IRQ\_F2P}
+\end{frame}}{}
 
 % =============================================================================
 \begin{frame}{Conclusões}
