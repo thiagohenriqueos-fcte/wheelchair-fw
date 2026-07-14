@@ -300,6 +300,46 @@ ocupada no ARM. A escolha \'e natural: \emph{stream} para o fluxo volumoso e
 sequencial (a varredura), mapeado em mem\'oria para o punhado de escalares
 (calibra\c{c}\~ao e resultado).
 
+\subsection{Sistema em Chip}
+
+O acelerador foi empacotado como IP e integrado ao ARM Cortex-A9 do Zynq num
+\emph{block design} (Fig.~\ref{fig:bd}). O ARM mant\'em a varredura na DDR; o
+AXI-DMA a l\^e pela porta \texttt{S\_AXI\_HP0} e a entrega ao acelerador como
+\emph{stream}; as \num{19} folgas retornam por AXI4-Lite e a
+\texttt{IRQ\_F2P} sinaliza a conclus\~ao.
+
+\begin{figure}[!t]
+\centering
+\IfFileExists{figs/block_design.png}{%
+  \includegraphics[width=\columnwidth]{figs/block_design.png}%
+}{%
+  % Sem o PNG do Vivado, desenha o esquema equivalente.
+  \begin{tikzpicture}[font=\scriptsize, node distance=6mm,
+    blk/.style={draw, rounded corners=2pt, minimum height=10mm,
+                minimum width=19mm, align=center, inner sep=3pt},
+    arr/.style={-Latex, thick}]
+    \node[blk, fill=green!10] (ps) {\textbf{Zynq PS}\\ARM A9\\\scriptsize DDR};
+    \node[blk, right=8mm of ps, fill=blue!10] (dma) {\textbf{AXI}\\\textbf{DMA}};
+    \node[blk, right=8mm of dma, fill=orange!14] (acc)
+         {\textbf{lidar\_accel}\\\scriptsize CORDIC $+$ 19 pistas};
+    \draw[arr] (ps) -- node[above, font=\tiny] {Lite} (dma);
+    \draw[arr] (dma) -- node[above, font=\tiny] {Stream} (acc);
+    \draw[arr] (ps.south) -- ++(0,-5mm) -|
+      node[pos=0.25, below, font=\tiny] {AXI4-Lite: 19 folgas} (acc.south);
+    \draw[arr, red] (acc.north) -- ++(0,5mm) -|
+      node[pos=0.25, above, font=\tiny] {IRQ} (ps.north);
+  \end{tikzpicture}%
+}
+\caption{\emph{Block design} no Vivado: o ARM (\texttt{zynq}) acessa o
+acelerador e o DMA por AXI4-Lite atrav\'es do \texttt{zynq\_axi\_periph}; o
+\texttt{dma} l\^e a varredura da DDR (\texttt{M\_AXI\_MM2S} $\to$
+\texttt{axi\_mem\_intercon} $\to$ \texttt{S\_AXI\_HP0}) e a entrega ao
+\texttt{accel} por AXI4-Stream (\texttt{M\_AXIS\_MM2S} $\to$
+\texttt{s\_axis}); a conclus\~ao volta por \texttt{irq} $\to$
+\texttt{IRQ\_F2P}.}
+\label{fig:bd}
+\end{figure}
+
 % =============================================================================
 \section{Resultados}
 
