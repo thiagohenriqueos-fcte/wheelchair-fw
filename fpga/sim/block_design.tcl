@@ -56,8 +56,14 @@ update_compile_order -fileset sources_1
 #-------------------------------------------------------------------------------
 # Empacota o acelerador como IP
 #-------------------------------------------------------------------------------
+# BUG 3 (corrigido): o flag -module do ipx::package_project serve para empacotar
+# um BLOCK DESIGN com aquele nome, nao um modulo RTL. Passando
+# "-module lidar_accel_axi" o Vivado procura um block design inexistente e falha
+# com "[Ipptcl 7-538] The block design 'lidar_accel_axi' must be opened to
+# package". Para empacotar o projeto RTL corrente, basta NAO passar -module: ele
+# usa o top do fileset (ja definido acima como lidar_accel_axi).
 ipx::package_project -root_dir $OUT/ip_repo -vendor unb -library user \
-  -taxonomy /UserIP -module lidar_accel_axi -import_files -force
+  -taxonomy /UserIP -import_files -force
 ipx::unload_core $OUT/ip_repo/component.xml
 
 set_property ip_repo_paths $OUT/ip_repo [current_project]

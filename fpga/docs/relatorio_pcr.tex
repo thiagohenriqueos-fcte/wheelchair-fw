@@ -5,8 +5,10 @@
 %  Compilacao: pdflatex relatorio_pcr.tex  (2x, por causa das referencias)
 %  Requer os .dat em docs/figs/ (gerados por golden/gen_figs.py)
 %
-%  ==> CAMPOS A PREENCHER APOS RODAR O VIVADO: procure por "\vivado{" no texto.
-%      Os valores estao em fpga/vivado/reports/.
+%  Numeros de sintese (Vivado 2022.2, xc7z020clg484-1) ja preenchidos:
+%    WNS +0,872 ns | Fmax 109,6 MHz | LUT 2445 | FF 1808 | DSP 54 | BRAM 0
+%    Potencia 0,246 W (0,140 dinamica + 0,106 estatica)
+%  Reproduzir: vivado -mode batch -source sim/report_only.tcl
 % =============================================================================
 \documentclass[conference]{IEEEtran}
 \IEEEoverridecommandlockouts
@@ -29,9 +31,9 @@
 
 \sisetup{output-decimal-marker={,}, per-mode=symbol, detect-all}
 
-% Marca os numeros que so o Vivado fornece. Depois de rodar a sintese, troque
-% \vivado{X} pelo valor -- ou redefina a macro para imprimir sem destaque.
-\newcommand{\vivado}[1]{\textcolor{red}{\textbf{#1}}}
+% Marcava numeros pendentes do Vivado. Nao ha mais nenhum -- mantida por
+% compatibilidade caso se acrescente algum campo novo.
+\newcommand{\vivado}[1]{\textbf{#1}}
 
 \lstset{basicstyle=\ttfamily\scriptsize, breaklines=true, columns=fullflexible,
         frame=single, framesep=3pt, xleftmargin=2pt}
@@ -532,15 +534,17 @@ Os valores a seguir vêm dos relat\'orios do Vivado
 \toprule
 \textbf{Recurso} & \textbf{Previsto} & \textbf{Obtido} & \textbf{Dispon\'ivel} & \textbf{\%} \\
 \midrule
-LUT        & ---          & \num{2447}   & \num{53200}  & \SI{4.6}{\percent} \\
-Flip-flop  & ---          & \num{1792}   & \num{106400} & \SI{1.7}{\percent} \\
+LUT        & ---          & \num{2445}   & \num{53200}  & \SI{4.6}{\percent} \\
+Flip-flop  & ---          & \num{1808}   & \num{106400} & \SI{1.7}{\percent} \\
 DSP48E1    & \num{78}     & \textbf{\num{54}} & \num{220} & \SI{24.5}{\percent} \\
 BRAM       & \num{0}      & \textbf{\num{0}}  & \num{140} & \SI{0}{\percent} \\
+SRL        & ---          & \num{17}     & ---          & --- \\
 \midrule
 \multicolumn{5}{@{}l@{}}{WNS (\emph{setup}): \textbf{\SI{+0.872}{\nano\second}} $\Rightarrow$ o \emph{timing} fecha a \SI{100}{\mega\hertz}} \\
 \multicolumn{5}{@{}l@{}}{WHS (\emph{hold}): \SI{+0.059}{\nano\second}} \\
 \multicolumn{5}{@{}l@{}}{$F_{\max}$: \textbf{\SI{109.6}{\mega\hertz}}} \\
-\multicolumn{5}{@{}l@{}}{Pot\^encia total: \vivado{--- W} (ver \texttt{power.rpt})} \\
+\multicolumn{5}{@{}l@{}}{Pot\^encia total: \textbf{\SI{0.246}{\watt}}
+  (din\^amica \SI{0.140}{\watt} $+$ est\'atica \SI{0.106}{\watt})} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -550,6 +554,19 @@ com \textbf{WNS de \SI{+0.872}{\nano\second}} --- folga confort\'avel para o alv
 de \SI{100}{\mega\hertz} ($F_{\max} = \SI{109.6}{\mega\hertz}$). O consumo de
 l\'ogica \'e modesto: \SI{4.6}{\percent} dos LUT e \SI{1.7}{\percent} dos
 \emph{flip-flops}.
+
+\paragraph{Pot\^encia}
+O acelerador consome \SI{0.246}{\watt} no total, dos quais apenas
+\SI{0.140}{\watt} s\~ao din\^amicos --- o restante \'e a corrente de fuga do
+dispositivo, que existiria com a FPGA ligada mesmo sem nenhum projeto carregado.
+A parcela din\^amica \'e baixa porque o \emph{datapath}, embora largo (\num{19}
+pistas em paralelo), \'e raso: cada est\'agio faz uma multiplica\c{c}\~ao e uma
+compara\c{c}\~ao, sem mem\'oria e sem realimenta\c{c}\~ao. Convém n\~ao
+superinterpretar o n\'umero: uma compara\c{c}\~ao honesta com a Raspberry~Pi~5
+exigiria medir a pot\^encia \emph{incremental} da CPU ao executar o supervisor, o
+que n\~ao foi feito --- e o Zynq tamb\'em consumiria o seu pr\'oprio ARM. O que se
+pode afirmar \'e que o custo energ\'etico da l\'ogica \'e desprez\'ivel frente ao
+dos motores da cadeira, da ordem de dezenas de \si{\watt}.
 
 \paragraph{Onde a previs\~ao anal\'itica errou --- para mais}
 Havia-se previsto \num{78} DSP48 ($19\times4$ das pistas mais \num{2} da

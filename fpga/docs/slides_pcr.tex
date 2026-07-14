@@ -460,7 +460,7 @@ estávamos perdendo prazos}.
 \end{frame}
 
 % =============================================================================
-\begin{frame}{Síntese: recursos e timing \hfill \scriptsize Vivado 2022.2, xc7z020}
+\begin{frame}{Síntese: recursos, timing e potência \hfill \scriptsize Vivado 2022.2, xc7z020}
 \begin{columns}[T]
 \begin{column}{0.46\textwidth}
 \centering
@@ -468,21 +468,22 @@ estávamos perdendo prazos}.
 \toprule
  & \scriptsize prev. & \scriptsize obtido & \scriptsize \% \\
 \midrule
-LUT & --- & 2.447 & 4,6 \\
-FF & --- & 1.792 & 1,7 \\
+LUT & --- & 2.445 & 4,6 \\
+FF & --- & 1.808 & 1,7 \\
 \textbf{DSP48} & 78 & \alert{\textbf{54}} & 24,5 \\
 BRAM & 0 & \textbf{0} & 0 \\
 \bottomrule
 \end{tabular}
 
-\vspace{3mm}
-\begin{exampleblock}{\footnotesize Timing}
+\vspace{2mm}
+\begin{exampleblock}{\footnotesize Timing e potência}
 \centering\footnotesize
-WNS $=$ \textbf{\SI{+0.872}{\nano\second}}\\
-$\Rightarrow$ \alert{fecha a \SI{100}{\mega\hertz}}\\[1mm]
-$F_{\max} = $ \textbf{\SI{109.6}{\mega\hertz}}
+WNS $=$ \textbf{\SI{+0.872}{\nano\second}} $\Rightarrow$ \alert{fecha a \SI{100}{\mega\hertz}}\\
+$F_{\max} = $ \textbf{\SI{109.6}{\mega\hertz}}\\[1mm]
+Potência: \textbf{\SI{0.246}{\watt}}\\
+{\scriptsize (dinâmica 0,140 W $+$ estática 0,106 W)}
 \end{exampleblock}
-\centering\tiny Potência: ver \texttt{power.rpt} \hfill 0 erros, 0 \emph{critical warnings}
+\centering\tiny 0 erros, 0 \emph{critical warnings}
 \end{column}
 \begin{column}{0.54\textwidth}
 \begin{alertblock}{Erramos a previsão de DSP --- para MAIS}
