@@ -525,31 +525,60 @@ Os valores a seguir vêm dos relat\'orios do Vivado
 (\texttt{vivado/reports/}).
 
 \begin{table}[!t]
-\caption{S\'intese e implementa\c{c}\~ao (Vivado, \texttt{xc7z020})}
+\caption{S\'intese e implementa\c{c}\~ao (Vivado 2022.2, \texttt{xc7z020clg484-1})}
 \label{tab:util}
 \centering\footnotesize
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-\textbf{Recurso} & \textbf{Usado} & \textbf{Dispon\'ivel} & \textbf{\%} \\
+\textbf{Recurso} & \textbf{Previsto} & \textbf{Obtido} & \textbf{Dispon\'ivel} & \textbf{\%} \\
 \midrule
-LUT        & \vivado{---} & \num{53200} & \vivado{---} \\
-Flip-flop  & \vivado{---} & \num{106400} & \vivado{---} \\
-DSP48      & \vivado{---} & \num{220}   & \vivado{---} \\
-BRAM       & \vivado{---} & \num{140}   & \vivado{---} \\
+LUT        & ---          & \num{2447}   & \num{53200}  & \SI{4.6}{\percent} \\
+Flip-flop  & ---          & \num{1792}   & \num{106400} & \SI{1.7}{\percent} \\
+DSP48E1    & \num{78}     & \textbf{\num{54}} & \num{220} & \SI{24.5}{\percent} \\
+BRAM       & \num{0}      & \textbf{\num{0}}  & \num{140} & \SI{0}{\percent} \\
 \midrule
-WNS (folga) & \multicolumn{3}{l}{\vivado{--- ns}} \\
-$F_{\max}$  & \multicolumn{3}{l}{\vivado{--- MHz}} \\
-Pot\^encia total & \multicolumn{3}{l}{\vivado{--- W}} \\
+\multicolumn{5}{@{}l@{}}{WNS (\emph{setup}): \textbf{\SI{+0.872}{\nano\second}} $\Rightarrow$ o \emph{timing} fecha a \SI{100}{\mega\hertz}} \\
+\multicolumn{5}{@{}l@{}}{WHS (\emph{hold}): \SI{+0.059}{\nano\second}} \\
+\multicolumn{5}{@{}l@{}}{$F_{\max}$: \textbf{\SI{109.6}{\mega\hertz}}} \\
+\multicolumn{5}{@{}l@{}}{Pot\^encia total: \vivado{--- W} (ver \texttt{power.rpt})} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\noindent\textbf{Previs\~ao anal\'itica} (a ser confrontada com a
-Tab.~\ref{tab:util}): \num{78} DSP48 (\SI{35}{\percent}) --- \num{76} das pistas
-mais \num{2} da proje\c{c}\~ao; nenhum BRAM, pois n\~ao h\'a mem\'oria interna
-(o fluxo \'e puramente \emph{streaming}); e o caminho cr\'itico deve situar-se no
-somador de \num{32} bits que soma os dois produtos da pista, antes do
-truncamento.
+A s\'intese conclui sem erros nem \emph{critical warnings}, e o roteamento fecha
+com \textbf{WNS de \SI{+0.872}{\nano\second}} --- folga confort\'avel para o alvo
+de \SI{100}{\mega\hertz} ($F_{\max} = \SI{109.6}{\mega\hertz}$). O consumo de
+l\'ogica \'e modesto: \SI{4.6}{\percent} dos LUT e \SI{1.7}{\percent} dos
+\emph{flip-flops}.
+
+\paragraph{Onde a previs\~ao anal\'itica errou --- para mais}
+Havia-se previsto \num{78} DSP48 ($19\times4$ das pistas mais \num{2} da
+proje\c{c}\~ao). A ferramenta usou \textbf{\num{54}}, \SI{31}{\percent} a menos.
+A raz\~ao \'e instrutiva e s\'o aparece ao ler o \emph{DSP Final Report}: o
+DSP48E1 n\~ao \'e um multiplicador isolado, mas um bloco
+\emph{multiplicador-acumulador} com uma porta $C$ e uma cascata dedicada
+(\texttt{PCIN}) para o pr\'oximo DSP da coluna. A s\'intese reconheceu que
+\begin{equation*}
+x^{(k)} = X\cos\delta_k + Y\sin\delta_k
+\end{equation*}
+\noindent \'e exatamente a forma que o bloco implementa nativamente, e fundiu o
+segundo produto e a soma em \emph{um} DSP --- ora pela porta $C$
+(\texttt{C+A*B}), ora encadeando pelo \texttt{PCIN} (\texttt{PCIN+A*B}). Onde o
+coeficiente \'e trivial, economizou ainda mais: a pista central ($\delta_9=0$,
+com $\sin\delta_9 = 0$) dispensa metade dos produtos.
+
+A li\c{c}\~ao \'e que estimar recursos contando operadores do RTL \emph{superestima}
+o custo: o mapeamento explora estrutura do dispositivo que n\~ao aparece no
+c\'odigo. A folga resultante \'e substancial --- sobram \SI{75}{\percent} dos DSP,
+espa\c{c}o para praticamente \emph{triplicar} o n\'umero de candidatos $K$ sem
+sair do \texttt{xc7z020}.
+
+\paragraph{Confirma\c{c}\~oes} O CORDIC de fato n\~ao consome
+\textbf{nenhum} DSP --- todos os \num{54} est\~ao no \texttt{corridor\_core}
+(pistas e proje\c{c}\~ao), como se pretendia ao escolher somadores e
+deslocamentos cabeados. E o uso de BRAM \'e \textbf{zero}, confirmando que a
+arquitetura \emph{streaming} n\~ao precisa armazenar a varredura: cada feixe \'e
+consumido no ciclo em que chega.
 
 % =============================================================================
 \section{Conclus\~ao}

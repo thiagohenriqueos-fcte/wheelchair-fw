@@ -95,21 +95,36 @@ report_power -file $REP/power.rpt
 # 5. Resumo no console -- os numeros que vao para a tabela do relatorio
 #-------------------------------------------------------------------------------
 set wns  [get_property SLACK [get_timing_paths -delay_type max]]
+set whs  [get_property SLACK [get_timing_paths -delay_type min]]
 set fmax [expr {1000.0 / ($FREQ_NS - $wns)}]
-set pwr  [get_property TOTAL_POWER [get_runs impl_1]]
 
-set luts [llength [get_cells -hier -filter {PRIMITIVE_GROUP == LUT}]]
-set ffs  [llength [get_cells -hier -filter {PRIMITIVE_GROUP == FLOP_LATCH}]]
-set dsps [llength [get_cells -hier -filter {PRIMITIVE_GROUP == ARITHMETIC}]]
+# Conta por REF_NAME. Os filtros PRIMITIVE_GROUP == ARITHMETIC / LUT nao casam
+# com nada no Vivado 2022.2 -- silenciosamente devolvem zero.
+set luts  [llength [get_cells -hier -filter {REF_NAME =~ LUT*}]]
+set ffs   [llength [get_cells -hier -filter {REF_NAME =~ FD*}]]
+set dsps  [llength [get_cells -hier -filter {REF_NAME =~ DSP48*}]]
+set brams [llength [get_cells -hier -filter {REF_NAME =~ RAMB*}]]
+
+# TOTAL_POWER nao e propriedade valida do run neste contexto; le do proprio .rpt
+set pwr "n/d"
+if {[file exists $REP/power.rpt]} {
+  set fh [open $REP/power.rpt r]
+  while {[gets $fh line] >= 0} {
+    if {[regexp {Total On-Chip Power \(W\)\s*\|\s*([0-9.]+)} $line -> v]} { set pwr $v }
+  }
+  close $fh
+}
 
 puts "\n================ RESUMO PARA O RELATORIO ================"
 puts [format "  Periodo alvo    : %.2f ns (%.0f MHz)" $FREQ_NS [expr {1000.0/$FREQ_NS}]]
-puts [format "  WNS (folga)     : %+.3f ns" $wns]
+puts [format "  WNS (setup)     : %+.3f ns   %s" $wns [expr {$wns >= 0 ? "-> TIMING FECHA" : "-> VIOLA"}]]
+puts [format "  WHS (hold)      : %+.3f ns" $whs]
 puts [format "  Fmax            : %.1f MHz" $fmax]
-puts [format "  Potencia total  : %.3f W" $pwr]
-puts [format "  LUTs            : %d" $luts]
-puts [format "  Flip-flops      : %d" $ffs]
-puts [format "  DSP48           : %d" $dsps]
+puts [format "  Potencia total  : %s W" $pwr]
+puts [format "  LUT             : %d de 53200 (%.1f%%)" $luts [expr {100.0*$luts/53200}]]
+puts [format "  Flip-flop       : %d de 106400 (%.1f%%)" $ffs [expr {100.0*$ffs/106400}]]
+puts [format "  DSP48           : %d de 220 (%.1f%%)" $dsps [expr {100.0*$dsps/220}]]
+puts [format "  BRAM            : %d de 140" $brams]
 puts "  Latencia (sim)  : 751 ciclos = 7,51 us @ 100 MHz"
 puts "  (relatorios completos em vivado/reports/)"
 puts "========================================================\n"

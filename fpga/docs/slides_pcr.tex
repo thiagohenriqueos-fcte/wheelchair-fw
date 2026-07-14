@@ -460,43 +460,90 @@ estávamos perdendo prazos}.
 \end{frame}
 
 % =============================================================================
-\begin{frame}{Síntese: recursos, timing e potência \hfill [VIVADO]}
+\begin{frame}{Síntese: recursos e timing \hfill \scriptsize Vivado 2022.2, xc7z020}
 \begin{columns}[T]
-\begin{column}{0.5\textwidth}
+\begin{column}{0.46\textwidth}
 \centering
-\begin{tabular}{@{}lrr@{}}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-\textbf{Recurso} & \textbf{Usado} & \textbf{\%} \\
+ & \scriptsize prev. & \scriptsize obtido & \scriptsize \% \\
 \midrule
-LUT & \alert{---} & \alert{---} \\
-FF & \alert{---} & \alert{---} \\
-DSP48 & \alert{---} & \alert{---} \\
-BRAM & \alert{---} & \alert{---} \\
-\midrule
-WNS & \multicolumn{2}{c}{\alert{--- ns}} \\
-$F_{\max}$ & \multicolumn{2}{c}{\alert{--- MHz}} \\
-Potência & \multicolumn{2}{c}{\alert{--- W}} \\
+LUT & --- & 2.447 & 4,6 \\
+FF & --- & 1.792 & 1,7 \\
+\textbf{DSP48} & 78 & \alert{\textbf{54}} & 24,5 \\
+BRAM & 0 & \textbf{0} & 0 \\
 \bottomrule
 \end{tabular}
 
+\vspace{3mm}
+\begin{exampleblock}{\footnotesize Timing}
+\centering\footnotesize
+WNS $=$ \textbf{\SI{+0.872}{\nano\second}}\\
+$\Rightarrow$ \alert{fecha a \SI{100}{\mega\hertz}}\\[1mm]
+$F_{\max} = $ \textbf{\SI{109.6}{\mega\hertz}}
+\end{exampleblock}
+\centering\tiny Potência: ver \texttt{power.rpt} \hfill 0 erros, 0 \emph{critical warnings}
+\end{column}
+\begin{column}{0.54\textwidth}
+\begin{alertblock}{Erramos a previsão de DSP --- para MAIS}
+\footnotesize
+Previmos \textbf{78} ($19\times4 + 2$). A ferramenta usou \textbf{54} --- \SI{31}{\percent} a menos.
+\end{alertblock}
+
+\footnotesize
+\textbf{Por quê?} O DSP48E1 não é um multiplicador isolado: é um
+\textbf{multiplicador-acumulador} com porta $C$ e cascata \texttt{PCIN}.
+
+\vspace{1mm}
+A síntese reconheceu que
+\[ x^{(k)} = X\cos\delta_k + Y\sin\delta_k \]
+é a forma que o bloco implementa \textbf{nativamente}, e fundiu produto $+$ soma
+num \emph{único} DSP.
+
 \vspace{2mm}
-\scriptsize \texttt{xc7z020} (ZedBoard)
+\alert{\footnotesize Contar operadores do RTL \textbf{superestima} o custo:
+o mapeamento explora estrutura do dispositivo que não aparece no código.}
+\end{column}
+\end{columns}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{O que a síntese confirmou}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\begin{exampleblock}{CORDIC: \textbf{0 DSP}}
+\footnotesize
+Os \textbf{54} DSP estão \emph{todos} no \texttt{corridor\_core} (pistas $+$
+projeção).
+
+\vspace{1mm}
+O CORDIC usa só somadores e deslocamentos cabeados --- exatamente o que se
+pretendia ao escolhê-lo.
+\end{exampleblock}
+
+\begin{exampleblock}{BRAM: \textbf{0}}
+\footnotesize
+A arquitetura \emph{streaming} não precisa armazenar a varredura: cada feixe é
+consumido \textbf{no ciclo em que chega}.
+\end{exampleblock}
 \end{column}
 \begin{column}{0.5\textwidth}
+\begin{block}{Folga para crescer}
 \footnotesize
-\textbf{Previsão analítica} (a confrontar):
-\begin{itemize}\footnotesize
-\item \textbf{78 DSP48} de 220 (\SI{35}{\percent}) \\
-      \scriptsize 76 das pistas $+$ 2 da projeção
-\item \textbf{0 BRAM} --- não há memória interna, o fluxo é puramente
-      \emph{streaming}
-\item \textbf{Caminho crítico}: o somador de 32 bits que soma os dois produtos da
-      pista, antes do truncamento
-\end{itemize}
+Sobram \textbf{\SI{75}{\percent}} dos DSP.
 
-\vspace{3mm}
+\vspace{2mm}
+Dá para \textbf{triplicar} o número de candidatos $K$ sem sair do
+\texttt{xc7z020} --- ou aumentar a precisão das pistas.
+
+\vspace{2mm}
+E o gargalo continuaria sendo o \textbf{sensor} (\SI{100}{\milli\second}), não a
+computação.
+\end{block}
+
+\vspace{2mm}
 \centering
-\alert{\scriptsize [COLAR AQUI: print do \\ \texttt{timing\_summary} e \texttt{power}]}
+\alert{\scriptsize [COLAR AQUI: print do \texttt{timing\_summary} \\ e do \texttt{power.rpt}]}
 \end{column}
 \end{columns}
 \end{frame}
