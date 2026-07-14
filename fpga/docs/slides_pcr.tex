@@ -330,6 +330,62 @@ Em ponto fixo, a \textbf{FAIXA} costuma ser mais crítica que a \textbf{RESOLUÇ
 \end{frame}
 
 % =============================================================================
+\begin{frame}{Saída do HW vs saída do SW}
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=6.4cm, height=4.2cm,
+  xlabel={$\delta_k$ (graus)}, ylabel={folga (m)},
+  xmin=-48, xmax=48, xtick={-45,-15,15,45},
+  legend style={font=\tiny, at={(0.02,0.98)}, anchor=north west},
+  grid=major, grid style={gray!20},
+  tick label style={font=\tiny}, label style={font=\tiny}]
+  \addplot[thick, blue, mark=o, mark size=2pt]
+    table[x=delta, y=sw] {figs/sw_hw_scan0.dat};
+  \addlegendentry{SW (float)}
+  \addplot[red, only marks, mark=x, mark size=3.5pt]
+    table[x=delta, y=hw] {figs/sw_hw_scan0.dat};
+  \addlegendentry{HW (RTL simulado)}
+\end{axis}
+\end{tikzpicture}
+\end{center}
+\centering\tiny As curvas \textbf{se sobrepõem} --- é esse o resultado.
+\end{column}
+\begin{column}{0.48\textwidth}
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=5.8cm, height=4.2cm,
+  xlabel={$\delta_k$ (graus)}, ylabel={erro HW$-$SW (mm)},
+  xmin=-48, xmax=48, xtick={-45,-15,15,45},
+  legend style={font=\tiny, at={(0.98,0.02)}, anchor=south east},
+  grid=major, grid style={gray!20},
+  tick label style={font=\tiny}, label style={font=\tiny}]
+  \draw[gray, dashed] (axis cs:-48,0.98) -- (axis cs:48,0.98);
+  \draw[gray, dashed] (axis cs:-48,-0.98) -- (axis cs:48,-0.98);
+  \addplot[only marks, mark=*, mark size=1.4pt, blue]
+    table[x=delta, y=err_mm] {figs/err_scan0.dat};
+  \addplot[only marks, mark=square*, mark size=1.4pt, red]
+    table[x=delta, y=err_mm] {figs/err_scan1.dat};
+  \addplot[only marks, mark=triangle*, mark size=1.8pt, orange]
+    table[x=delta, y=err_mm] {figs/err_scan2.dat};
+\end{axis}
+\end{tikzpicture}
+\end{center}
+\centering\tiny Tracejado: $\pm 1$ LSB. 3 varreduras, 57 comparações.
+\end{column}
+\end{columns}
+
+\vspace{1mm}
+\centering\footnotesize
+Erro médio \textbf{\SI{0.99}{\milli\metre}} $\;\vert\;$ máximo \textbf{\SI{5.27}{\milli\metre}}
+$\;\vert\;$ \alert{$\approx$ 1 LSB} $\;\vert\;$ \SI{0.9}{\percent} da zona de parada
+
+\vspace{1mm}
+\tiny O ``HW'' é a saída \textbf{real} da simulação VHDL (\texttt{rtl\_out}), não o modelo.
+\end{frame}
+
+% =============================================================================
 \begin{frame}{Desempenho}
 \begin{center}
 \begin{tabular}{@{}lrrr@{}}
@@ -345,12 +401,33 @@ HW \SI{150}{\mega\hertz} & \SI{5.01}{\micro\second} & $707\times$ & $98\times$ \
 \end{tabular}
 \end{center}
 
-\vspace{2mm}
-\centering\scriptsize
-\emph{Baseline} medido na própria Pi 5. Ciclos de HW \textbf{medidos na simulação}
---- não estimados.
+\vspace{-1mm}
+\begin{center}
+\begin{tikzpicture}
+\begin{semilogxaxis}[width=10.5cm, height=3.4cm,
+  xlabel={tempo por varredura ($\mu$s --- escala log)},
+  xmin=3, xmax=9000, xmajorgrids, grid style={gray!25},
+  symbolic y coords={HW150, HW100, NumPy, escalar},
+  ytick=data, y dir=reverse,
+  yticklabels={HW \SI{150}{\mega\hertz}, HW \SI{100}{\mega\hertz}, SW NumPy, SW escalar},
+  tick label style={font=\tiny}, label style={font=\tiny},
+  nodes near coords, nodes near coords style={font=\tiny, anchor=west},
+  point meta=explicit symbolic,
+  xbar, bar width=7pt, enlarge y limits=0.28]
+  \addplot[fill=red!30, draw=red!70!black] coordinates {
+    (3542, escalar) [\SI{3.54}{\milli\second}]
+    (488,  NumPy)   [\SI{0.488}{\milli\second}]};
+  \addplot[fill=blue!30, draw=blue!70!black] coordinates {
+    (7.51, HW100)   [\SI{7.51}{\micro\second}]
+    (5.01, HW150)   [\SI{5.01}{\micro\second}]};
+\end{semilogxaxis}
+\end{tikzpicture}
+\end{center}
+\centering\tiny
+Escala \textbf{logarítmica} --- quase três ordens de grandeza. \emph{Baseline}
+medido na Pi 5; ciclos de HW \textbf{medidos na simulação}.
 
-\vspace{4mm}
+\vspace{2mm}
 \begin{alertblock}{Análise crítica: o ganho de tempo \emph{não era necessário}}
 \footnotesize
 O LiDAR entrega uma varredura a cada \SI{100}{\milli\second}. Mesmo o software

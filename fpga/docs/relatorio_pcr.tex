@@ -268,6 +268,9 @@ dispon\'iveis no \texttt{xc7z020} (\SI{35}{\percent}).
 
 \subsection{Formato de ponto fixo}
 
+Os formatos adotados est\~ao na Tab.~\ref{tab:fmt}. A escolha da \emph{faixa} de
+Q3.13 mostrar-se-\'a decisiva na Se\c{c}\~ao~\ref{sec:prec}.
+
 \begin{table}[!t]
 \caption{Formatos adotados}
 \label{tab:fmt}
@@ -350,6 +353,7 @@ eles o balde, que o cone antigo n\~ao enxergava.}
 \end{figure}
 
 \subsection{Precis\~ao: um defeito de formato}
+\label{sec:prec}
 
 A an\'alise de precis\~ao produziu o achado mais instrutivo do trabalho. O
 primeiro modelo em ponto fixo divergia da refer\^encia em at\'e
@@ -385,12 +389,77 @@ li\c{c}\~ao \'e que, em ponto fixo, a escolha da \textbf{faixa} costuma ser mais
 cr\'itica que a da \textbf{resolu\c{c}\~ao}: perdemos \num{402} milímetros por
 tr\^es bits de parte inteira, n\~ao por falta de bits fracion\'arios.
 
+A Fig.~\ref{fig:swhw} confronta, candidato a candidato, a folga calculada em
+software (ponto flutuante, a refer\^encia f\'isica) com a produzida pelo
+\textbf{hardware} --- e o ``hardware'' aqui \'e a sa\'ida efetiva da
+simula\c{c}\~ao VHDL, lida de \texttt{rtl\_out}, e n\~ao o modelo. As curvas se
+sobrep\~oem: \'e esse o resultado. A Fig.~\ref{fig:erro} mostra o res\'iduo, com
+sinal, para as tr\^es varreduras: \num{57} compara\c{c}\~oes, erro m\'edio de
+\SI{0.99}{\milli\metre} e m\'aximo de \SI{5.27}{\milli\metre}, todas dentro de
+poucos LSB.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=4.4cm,
+  xlabel={candidato de desvio $\delta_k$ (graus)},
+  ylabel={folga (m)}, xmin=-48, xmax=48, xtick={-45,-30,-15,0,15,30,45},
+  legend pos=north west, legend style={font=\scriptsize},
+  grid=major, grid style={gray!20}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}]
+  \addplot[thick, blue!70!black, mark=o, mark size=2pt]
+    table[x=delta, y=sw] {figs/sw_hw_scan0.dat};
+  \addlegendentry{SW (ponto flutuante)}
+  \addplot[thick, red, only marks, mark=x, mark size=3pt]
+    table[x=delta, y=hw] {figs/sw_hw_scan0.dat};
+  \addlegendentry{HW (RTL simulado)}
+\end{axis}
+\end{tikzpicture}
+\caption{Folga por candidato: software \emph{versus} sa\'ida real do RTL, para a
+varredura de teste. As curvas se sobrep\~oem em toda a faixa --- o desvio \'e
+invis\'ivel nesta escala, o que \'e precisamente o resultado desejado.}
+\label{fig:swhw}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=4.2cm,
+  xlabel={candidato de desvio $\delta_k$ (graus)},
+  ylabel={erro HW$-$SW (mm)}, xmin=-48, xmax=48,
+  xtick={-45,-30,-15,0,15,30,45},
+  legend pos=south west, legend style={font=\tiny},
+  grid=major, grid style={gray!20}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}]
+  \draw[gray, dashed] (axis cs:-48,0.98) -- (axis cs:48,0.98);
+  \draw[gray, dashed] (axis cs:-48,-0.98) -- (axis cs:48,-0.98);
+  \node[gray, font=\tiny, anchor=west] at (axis cs:-46,1.7) {$\pm 1$ LSB};
+  \addplot[only marks, mark=*, mark size=1.6pt, blue!70!black]
+    table[x=delta, y=err_mm] {figs/err_scan0.dat};
+  \addlegendentry{varredura 0}
+  \addplot[only marks, mark=square*, mark size=1.6pt, red!70!black]
+    table[x=delta, y=err_mm] {figs/err_scan1.dat};
+  \addlegendentry{varredura 1}
+  \addplot[only marks, mark=triangle*, mark size=2pt, orange!90!black]
+    table[x=delta, y=err_mm] {figs/err_scan2.dat};
+  \addlegendentry{varredura 2}
+\end{axis}
+\end{tikzpicture}
+\caption{Res\'iduo HW$-$SW, com sinal, nas tr\^es varreduras (\num{57}
+compara\c{c}\~oes). Linhas tracejadas: $\pm1$ LSB de Q6.10
+(\SI{0.98}{\milli\metre}). O erro m\'aximo, \SI{5.27}{\milli\metre}, ocorre quando
+a quantiza\c{c}\~ao faz um ponto pr\'oximo da borda do corredor cruzar o limiar
+$|y|\le W/2$, trocando qual ponto \'e o m\'inimo --- efeito inerente a um
+crit\'erio de decis\~ao por limiar, e n\~ao ac\'umulo de erro aritm\'etico.}
+\label{fig:erro}
+\end{figure}
+
 \subsection{Desempenho}
 
 O \emph{baseline} de software foi medido na pr\'opria Raspberry~Pi~5 que embarca o
 sistema; a lat\^encia de hardware \'e o n\'umero de ciclos \textbf{medido na
 simula\c{c}\~ao} (\SI{7515}{\nano\second} a \SI{100}{\mega\hertz}), n\~ao uma
-estimativa anal\'itica.
+estimativa anal\'itica. A Tab.~\ref{tab:speedup} consolida os tempos.
 
 \begin{table}[!t]
 \caption{Tempo por varredura e ganho}
@@ -409,10 +478,38 @@ HW \SI{150}{\mega\hertz}     & \SI{5.01}{\micro\second}   & \num{707}$\times$ & 
 \end{tabular}
 \end{table}
 
-Vale interpretar o ganho, e n\~ao apenas exibi-lo. O LiDAR entrega uma varredura a
-cada \SI{100}{\milli\second}: mesmo o software vetorizado consome apenas
-\SI{0.5}{\percent} desse or\c{c}amento, de modo que \textbf{o acelerador n\~ao
-``salva'' o sistema} --- ele n\~ao estava perdendo prazos. O valor real \'e outro,
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{semilogxaxis}[width=\columnwidth, height=4cm,
+  xlabel={tempo por varredura ($\mu$s, escala log)},
+  xmin=3, xmax=9000, xmajorgrids, grid style={gray!25},
+  symbolic y coords={HW150, HW100, NumPy, escalar},
+  ytick=data, y dir=reverse,
+  yticklabels={HW \SI{150}{\mega\hertz}, HW \SI{100}{\mega\hertz},
+               SW NumPy, SW escalar},
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  nodes near coords, nodes near coords style={font=\tiny, anchor=west},
+  point meta=explicit symbolic,
+  xbar, bar width=6pt, enlarge y limits=0.25]
+  \addplot[fill=red!25, draw=red!60!black] coordinates {
+    (3542, escalar) [\SI{3.54}{\milli\second}]
+    (488,  NumPy)   [\SI{0.488}{\milli\second}]};
+  \addplot[fill=blue!25, draw=blue!60!black] coordinates {
+    (7.51, HW100)   [\SI{7.51}{\micro\second}]
+    (5.01, HW150)   [\SI{5.01}{\micro\second}]};
+\end{semilogxaxis}
+\end{tikzpicture}
+\caption{Tempo por varredura (escala logar\'itmica --- s\~ao quase tr\^es ordens de
+grandeza). \emph{Baseline} de software medido na pr\'opria Raspberry~Pi~5; o
+tempo de hardware \'e o n\'umero de ciclos \textbf{medido na simula\c{c}\~ao}.}
+\label{fig:tempos}
+\end{figure}
+
+Vale interpretar o ganho, e n\~ao apenas exibi-lo (Fig.~\ref{fig:tempos}). O LiDAR
+entrega uma varredura a cada \SI{100}{\milli\second}: mesmo o software vetorizado
+consome apenas \SI{0.5}{\percent} desse or\c{c}amento, de modo que \textbf{o
+acelerador n\~ao ``salva'' o sistema} --- ele n\~ao estava perdendo prazos. O valor real \'e outro,
 e triplo: (i)~libera \SI{8.3}{\percent} da CPU num processador que tamb\'em roda
 SLAM e EKF, e que j\'a apresentou congelamento por exaust\~ao de mem\'oria;
 (ii)~torna a lat\^encia \textbf{determin\'istica}, ao contr\'ario de um n\'o

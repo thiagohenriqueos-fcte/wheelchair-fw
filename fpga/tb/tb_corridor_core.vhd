@@ -157,7 +157,7 @@ begin
     -- compara com o modelo de referencia, bit a bit
     file_open(status, fexp, scan_file("expected", SCAN_ID), read_mode);
     assert status = open_ok report "NAO ABRIU expected" severity failure;
-    file_open(fout, TB_DIR & "rtl_out.txt", write_mode);
+    file_open(fout, scan_file("rtl_out", SCAN_ID), write_mode);
 
     for k in 0 to K_CAND-1 loop
       readline(fexp, l);
