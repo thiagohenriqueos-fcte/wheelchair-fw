@@ -1,0 +1,24 @@
+LX_Q     683
+LY_Q     344
+HALF_W_Q 312
+FLOOR_Q  703
+FRONT_Q  683
+LANE  0  delta= -45.0  cos= 11585  sin=-11585
+LANE  1  delta= -40.0  cos= 12551  sin=-10531
+LANE  2  delta= -35.0  cos= 13421  sin= -9397
+LANE  3  delta= -30.0  cos= 14189  sin= -8192
+LANE  4  delta= -25.0  cos= 14849  sin= -6924
+LANE  5  delta= -20.0  cos= 15396  sin= -5604
+LANE  6  delta= -15.0  cos= 15826  sin= -4240
+LANE  7  delta= -10.0  cos= 16135  sin= -2845
+LANE  8  delta=  -5.0  cos= 16322  sin= -1428
+LANE  9  delta=  +0.0  cos= 16384  sin=     0
+LANE 10  delta=  +5.0  cos= 16322  sin=  1428
+LANE 11  delta= +10.0  cos= 16135  sin=  2845
+LANE 12  delta= +15.0  cos= 15826  sin=  4240
+LANE 13  delta= +20.0  cos= 15396  sin=  5604
+LANE 14  delta= +25.0  cos= 14849  sin=  6924
+LANE 15  delta= +30.0  cos= 14189  sin=  8192
+LANE 16  delta= +35.0  cos= 13421  sin=  9397
+LANE 17  delta= +40.0  cos= 12551  sin= 10531
+LANE 18  delta= +45.0  cos= 11585  sin= 11585
