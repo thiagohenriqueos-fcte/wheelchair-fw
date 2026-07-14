@@ -19,3 +19,12 @@
 __pycache__/
 *.py[cod]
 .venv/
+
+# LaTeX (fpga/docs) -- os PDFs sao versionados; os intermediarios nao
+fpga/docs/*.aux
+fpga/docs/*.log
+fpga/docs/*.out
+fpga/docs/*.nav
+fpga/docs/*.snm
+fpga/docs/*.toc
+fpga/docs/figs/trim.txt

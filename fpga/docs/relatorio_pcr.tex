@@ -308,37 +308,41 @@ AXI-DMA a l\^e pela porta \texttt{S\_AXI\_HP0} e a entrega ao acelerador como
 \emph{stream}; as \num{19} folgas retornam por AXI4-Lite e a
 \texttt{IRQ\_F2P} sinaliza a conclus\~ao.
 
-\begin{figure}[!t]
+% O write_bd_layout do Vivado gera a pagina em paisagem com /Rotate 270, de modo
+% que a figura entra deitada. O rotatebox{-90} a coloca de pe; o resizebox a
+% ajusta a largura das duas colunas. Sem o PDF, desenha-se o esquema equivalente.
+\begin{figure*}[!t]
 \centering
-\IfFileExists{figs/block_design.png}{%
-  \includegraphics[width=\columnwidth]{figs/block_design.png}%
+\IfFileExists{figs/block_design.pdf}{%
+  % 73%% da pagina do Vivado e branco: o trim recorta ate o conteudo.
+  \resizebox{\textwidth}{!}{\rotatebox{-90}{%
+    \includegraphics[trim=211 30 209 36, clip]{figs/block_design.pdf}}}%
 }{%
-  % Sem o PNG do Vivado, desenha o esquema equivalente.
-  \begin{tikzpicture}[font=\scriptsize, node distance=6mm,
-    blk/.style={draw, rounded corners=2pt, minimum height=10mm,
-                minimum width=19mm, align=center, inner sep=3pt},
+  \begin{tikzpicture}[font=\small, node distance=10mm,
+    blk/.style={draw, rounded corners=2pt, minimum height=12mm,
+                minimum width=26mm, align=center, inner sep=4pt},
     arr/.style={-Latex, thick}]
-    \node[blk, fill=green!10] (ps) {\textbf{Zynq PS}\\ARM A9\\\scriptsize DDR};
-    \node[blk, right=8mm of ps, fill=blue!10] (dma) {\textbf{AXI}\\\textbf{DMA}};
-    \node[blk, right=8mm of dma, fill=orange!14] (acc)
+    \node[blk, fill=green!10] (ps) {\textbf{Zynq PS}\\ARM Cortex-A9\\\scriptsize DDR};
+    \node[blk, right=16mm of ps, fill=blue!10] (dma) {\textbf{AXI-DMA}};
+    \node[blk, right=16mm of dma, fill=orange!14] (acc)
          {\textbf{lidar\_accel}\\\scriptsize CORDIC $+$ 19 pistas};
-    \draw[arr] (ps) -- node[above, font=\tiny] {Lite} (dma);
-    \draw[arr] (dma) -- node[above, font=\tiny] {Stream} (acc);
-    \draw[arr] (ps.south) -- ++(0,-5mm) -|
-      node[pos=0.25, below, font=\tiny] {AXI4-Lite: 19 folgas} (acc.south);
-    \draw[arr, red] (acc.north) -- ++(0,5mm) -|
+    \draw[arr] (ps) -- node[above, font=\tiny] {AXI4-Lite} (dma);
+    \draw[arr] (dma) -- node[above, font=\tiny] {AXI4-Stream} (acc);
+    \draw[arr] (ps.south) -- ++(0,-6mm) -|
+      node[pos=0.25, below, font=\tiny] {AXI4-Lite: calibra\c{c}\~ao $+$ 19 folgas} (acc.south);
+    \draw[arr, red] (acc.north) -- ++(0,6mm) -|
       node[pos=0.25, above, font=\tiny] {IRQ} (ps.north);
   \end{tikzpicture}%
 }
-\caption{\emph{Block design} no Vivado: o ARM (\texttt{zynq}) acessa o
-acelerador e o DMA por AXI4-Lite atrav\'es do \texttt{zynq\_axi\_periph}; o
+\caption{\emph{Block design} no Vivado. O ARM (\texttt{zynq}) alcan\c{c}a o
+acelerador e o DMA por AXI4-Lite atrav\'es do \texttt{zynq\_axi\_periph}. O
 \texttt{dma} l\^e a varredura da DDR (\texttt{M\_AXI\_MM2S} $\to$
 \texttt{axi\_mem\_intercon} $\to$ \texttt{S\_AXI\_HP0}) e a entrega ao
-\texttt{accel} por AXI4-Stream (\texttt{M\_AXIS\_MM2S} $\to$
-\texttt{s\_axis}); a conclus\~ao volta por \texttt{irq} $\to$
-\texttt{IRQ\_F2P}.}
+\texttt{accel} por AXI4-Stream (\texttt{M\_AXIS\_MM2S} $\to$ \texttt{s\_axis}).
+A conclus\~ao retorna por \texttt{irq} $\to$ \texttt{IRQ\_F2P}, dispensando
+espera ocupada no processador.}
 \label{fig:bd}
-\end{figure}
+\end{figure*}
 
 % =============================================================================
 \section{Resultados}
@@ -526,20 +530,19 @@ HW \SI{150}{\mega\hertz}     & \SI{5.01}{\micro\second}   & \num{707}$\times$ & 
 \begin{semilogxaxis}[width=\columnwidth, height=4cm,
   xlabel={tempo por varredura ($\mu$s, escala log)},
   xmin=3, xmax=9000, xmajorgrids, grid style={gray!25},
-  symbolic y coords={HW150, HW100, NumPy, escalar},
-  ytick=data, y dir=reverse,
-  yticklabels={HW \SI{150}{\mega\hertz}, HW \SI{100}{\mega\hertz},
-               SW NumPy, SW escalar},
+  symbolic y coords={HW150,HW100,NumPy,escalar},
+  ytick={HW150,HW100,NumPy,escalar}, y dir=reverse,
+  yticklabels={{HW \SI{150}{\mega\hertz}},{HW \SI{100}{\mega\hertz}},{SW NumPy},{SW escalar}},
   tick label style={font=\scriptsize}, label style={font=\scriptsize},
   nodes near coords, nodes near coords style={font=\tiny, anchor=west},
   point meta=explicit symbolic,
   xbar, bar width=6pt, enlarge y limits=0.25]
   \addplot[fill=red!25, draw=red!60!black] coordinates {
-    (3542, escalar) [\SI{3.54}{\milli\second}]
-    (488,  NumPy)   [\SI{0.488}{\milli\second}]};
+    (3542,escalar) [\SI{3.54}{\milli\second}]
+    (488,NumPy)    [\SI{0.488}{\milli\second}]};
   \addplot[fill=blue!25, draw=blue!60!black] coordinates {
-    (7.51, HW100)   [\SI{7.51}{\micro\second}]
-    (5.01, HW150)   [\SI{5.01}{\micro\second}]};
+    (7.51,HW100)   [\SI{7.51}{\micro\second}]
+    (5.01,HW150)   [\SI{5.01}{\micro\second}]};
 \end{semilogxaxis}
 \end{tikzpicture}
 \caption{Tempo por varredura (escala logar\'itmica --- s\~ao quase tr\^es ordens de

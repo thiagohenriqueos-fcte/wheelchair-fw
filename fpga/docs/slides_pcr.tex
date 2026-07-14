@@ -407,19 +407,19 @@ HW \SI{150}{\mega\hertz} & \SI{5.01}{\micro\second} & $707\times$ & $98\times$ \
 \begin{semilogxaxis}[width=10.5cm, height=3.4cm,
   xlabel={tempo por varredura ($\mu$s --- escala log)},
   xmin=3, xmax=9000, xmajorgrids, grid style={gray!25},
-  symbolic y coords={HW150, HW100, NumPy, escalar},
-  ytick=data, y dir=reverse,
-  yticklabels={HW \SI{150}{\mega\hertz}, HW \SI{100}{\mega\hertz}, SW NumPy, SW escalar},
+  symbolic y coords={HW150,HW100,NumPy,escalar},
+  ytick={HW150,HW100,NumPy,escalar}, y dir=reverse,
+  yticklabels={{HW \SI{150}{\mega\hertz}},{HW \SI{100}{\mega\hertz}},{SW NumPy},{SW escalar}},
   tick label style={font=\tiny}, label style={font=\tiny},
   nodes near coords, nodes near coords style={font=\tiny, anchor=west},
   point meta=explicit symbolic,
   xbar, bar width=7pt, enlarge y limits=0.28]
   \addplot[fill=red!30, draw=red!70!black] coordinates {
-    (3542, escalar) [\SI{3.54}{\milli\second}]
-    (488,  NumPy)   [\SI{0.488}{\milli\second}]};
+    (3542,escalar) [\SI{3.54}{\milli\second}]
+    (488,NumPy)    [\SI{0.488}{\milli\second}]};
   \addplot[fill=blue!30, draw=blue!70!black] coordinates {
-    (7.51, HW100)   [\SI{7.51}{\micro\second}]
-    (5.01, HW150)   [\SI{5.01}{\micro\second}]};
+    (7.51,HW100)   [\SI{7.51}{\micro\second}]
+    (5.01,HW150)   [\SI{5.01}{\micro\second}]};
 \end{semilogxaxis}
 \end{tikzpicture}
 \end{center}
@@ -542,9 +542,6 @@ E o gargalo continuaria sendo o \textbf{sensor} (\SI{100}{\milli\second}), não 
 computação.
 \end{block}
 
-\vspace{2mm}
-\centering
-\alert{\scriptsize [COLAR AQUI: print do \texttt{timing\_summary} \\ e do \texttt{power.rpt}]}
 \end{column}
 \end{columns}
 \end{frame}
@@ -578,13 +575,14 @@ computação.
 \end{frame}
 
 % =============================================================================
-% Slide com o print REAL do Vivado. Copie vivado/reports/block_design.png para
-% docs/figs/ e ele aparece automaticamente; sem o arquivo, o slide é pulado.
-\IfFileExists{figs/block_design.png}{%
+% Slide com o print REAL do Vivado. O write_bd_layout gera a página em paisagem
+% com /Rotate 270, então a figura entra deitada: o rotatebox{-90} a põe de pé.
+% Sem o arquivo, o slide é simplesmente pulado (o TikZ anterior já explica).
+\IfFileExists{figs/block_design.pdf}{%
 \begin{frame}{Block design no Vivado}
 \begin{center}
-\includegraphics[width=0.92\textwidth, height=0.72\textheight, keepaspectratio]%
-  {figs/block_design.png}
+\resizebox{\textwidth}{!}{\rotatebox{-90}{%
+  \includegraphics[trim=211 30 209 36, clip]{figs/block_design.pdf}}}
 \end{center}
 \centering\tiny
 \texttt{zynq} $\to$ \texttt{zynq\_axi\_periph} (AXI4-Lite) $\to$ \texttt{dma} e
