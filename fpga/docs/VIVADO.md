@@ -52,16 +52,31 @@ Abra **os dois** `.tcl` e confira a linha do `PART`:
 
 ## 3. Rodar
 
-Abra o **Vivado Tcl Shell** (ou o prompt com `vivado` no PATH) e:
+**Onde você está muda o comando** --- este é o erro mais fácil de cometer:
 
-```bash
-cd caminho/para/fpga          # entre NA pasta fpga (os scripts usam caminho relativo)
+| você está em... | comando |
+|---|---|
+| **console Tcl do Vivado** | `source sim/build_vivado.tcl` |
+| **cmd / PowerShell** (fora do Vivado) | `vivado -mode batch -source sim/build_vivado.tcl` |
 
-# (a) síntese + implementação + timing + potência + recursos
-vivado -mode batch -source sim/build_vivado.tcl
+⚠️ **Não digite `vivado -mode batch -source ...` DENTRO do console Tcl.** O Vivado
+não reconhece como comando Tcl, repassa ao shell do SO e abre um **segundo
+Vivado por baixo**. Funciona por acidente, mas confunde qual script rodou --- e o
+aviso no topo do log denuncia:
 
-# (b) block design (ARM + AXI-DMA + acelerador) + a figura para o slide
-vivado -mode batch -source sim/block_design.tcl
+```
+WARNING: [Common 17-259] Unknown Tcl command 'vivado -mode batch -source ...'
+         sending command to the OS shell for execution.
+```
+
+Do console Tcl do Vivado, então:
+
+```tcl
+cd C:/caminho/para/fpga        ;# entre NA pasta fpga (os scripts usam caminho relativo)
+
+source sim/build_vivado.tcl    ;# síntese + impl + timing + potência + recursos (~5 min)
+source sim/report_only.tcl     ;# só os números, sem re-sintetizar (~30 s)
+source sim/block_design.tcl    ;# block design + a figura do slide
 ```
 
 Cada um leva alguns minutos. O `build_vivado.tcl` **imprime um resumo no
@@ -96,12 +111,23 @@ Tudo em **`fpga/vivado/reports/`**:
 No relatório e nos slides, os campos pendentes estão marcados em **vermelho**
 (`\vivado{---}` / `[VIVADO]`) — impossível esquecer algum.
 
+## 4b. Já rodou a síntese e só quer os números?
+
+`sim/report_only.tcl` abre o *checkpoint já roteado* e imprime WNS, WHS, Fmax,
+LUT/FF/DSP/BRAM e a **potência** (total, dinâmica, estática) em ~30 s --- sem
+repetir os ~5 min de síntese.
+
 ## 5. Se algo falhar
 
+- **Rodou o script errado**: confira a linha `source ...` no topo do log --- ela
+  diz qual script de fato rodou.
 - **`ERROR: [Common 17-70] Application Exception`** ao empacotar o IP no
   `block_design.tcl`: rode primeiro o `build_vivado.tcl` (ele valida o RTL
   sozinho, sem block design). Se o RTL sintetizar, o problema é do empacotamento
   — dá para montar o block design pela GUI, importando o IP de `vivado/ip_repo`.
+- O `block_design.tcl` **não roda implementação** por padrão (os números de
+  timing/potência já vieram do `build_vivado.tcl`, e o módulo é o mesmo). Para
+  rodar assim mesmo: `set ::RUN_IMPL 1` antes do `source`.
 - **Versão do Vivado**: os scripts usam APIs estáveis desde 2019.2. Se sua
   versão reclamar de `write_bd_layout -format pdf`, troque para `-format png`.
 - **Simular dentro do Vivado** (opcional — o GHDL já provou a equivalência):

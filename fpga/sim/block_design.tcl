@@ -6,21 +6,32 @@
 #   +------------------+   AXI4-Lite (GP0)   +--------------------+
 #   |  Zynq PS         |-------------------->|  lidar_accel_axi   |
 #   |  (ARM Cortex-A9) |                     |                    |
-#   |                  |   AXI4-Stream       |  CORDIC + 19 lanes |
+#   |                  |   AXI4-Stream       |  CORDIC + 19 pistas|
 #   |  DDR: /scan      |==== AXI-DMA ========>|                    |
 #   +------------------+   (HP0 -> S_AXIS)   +--------------------+
 #            ^                                          |
 #            +---------------- IRQ ---------------------+
 #
-# O ARM guarda a varredura na DDR, o AXI-DMA a transmite como AXI4-Stream para o
-# acelerador, e o resultado (19 folgas) volta por AXI4-Lite. A interrupcao avisa
-# o fim -- o ARM nao fica em espera ocupada.
+# COMO RODAR
+# ----------
+#   No console Tcl do Vivado (ja aberto):
+#       cd .../fpga
+#       source sim/block_design.tcl
 #
-# Uso:
-#     vivado -mode batch -source sim/block_design.tcl
+#   No cmd/PowerShell (fora do Vivado):
+#       vivado -mode batch -source sim/block_design.tcl
 #
-# Gera vivado/reports/block_design.pdf -- a figura do slide/relatorio.
+#   NAO digite "vivado -mode batch ..." DENTRO do console Tcl: o Vivado repassa
+#   ao shell do SO e abre um segundo Vivado por baixo.
+#
+# Gera vivado/reports/block_design.pdf|.png -- a figura do slide.
+#
+# Por padrao NAO roda implementacao (os numeros de timing/potencia ja vieram do
+# build_vivado.tcl, e o modulo e o mesmo). Para rodar tambem:
+#       set ::RUN_IMPL 1   ;# antes do source
 #===============================================================================
+
+if {![info exists ::RUN_IMPL]} { set ::RUN_IMPL 0 }
 
 set PROJ "lidar_accel_bd"
 set PART "xc7z020clg484-1"    ;# ZedBoard. PYNQ-Z1: xc7z020clg400-1
@@ -39,16 +50,30 @@ add_files -norecurse [list \
   $ROOT/rtl/corridor_core.vhd \
   $ROOT/rtl/lidar_accel_axi.vhd ]
 set_property file_type {VHDL 2008} [get_files *.vhd]
+set_property top lidar_accel_axi [current_fileset]
 update_compile_order -fileset sources_1
 
 #-------------------------------------------------------------------------------
-# Empacota o acelerador como IP (para instanciar no block design)
+# Empacota o acelerador como IP
 #-------------------------------------------------------------------------------
 ipx::package_project -root_dir $OUT/ip_repo -vendor unb -library user \
   -taxonomy /UserIP -module lidar_accel_axi -import_files -force
 ipx::unload_core $OUT/ip_repo/component.xml
+
 set_property ip_repo_paths $OUT/ip_repo [current_project]
 update_ip_catalog -rebuild
+
+# BUG 1 (corrigido): o VLNV do IP empacotado carrega a VERSAO
+# (unb:user:lidar_accel_axi:1.0). Usar "unb:user:lidar_accel_axi" sem versao
+# falha. Em vez de chutar, descobrimos o VLNV real no catalogo.
+set ipdef [get_ipdefs -all *lidar_accel_axi*]
+if {[llength $ipdef] == 0} {
+  puts "ERRO: o IP lidar_accel_axi nao entrou no catalogo."
+  puts "      Verifique o empacotamento (ipx::package_project) acima."
+  return
+}
+set ACCEL_VLNV [lindex $ipdef 0]
+puts "IP empacotado: $ACCEL_VLNV"
 
 #-------------------------------------------------------------------------------
 # Block design
@@ -59,13 +84,13 @@ create_bd_design "system"
 create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7 zynq
 apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
   -config {make_external "FIXED_IO, DDR" apply_board_preset "1"} [get_bd_cells zynq]
-# habilita porta HP (para o DMA acessar a DDR) e a entrada de interrupcao
+# porta HP (o DMA acessa a DDR por ela) e entrada de interrupcao do PL
 set_property -dict [list \
   CONFIG.PCW_USE_S_AXI_HP0 {1} \
   CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
   CONFIG.PCW_IRQ_F2P_INTR {1}] [get_bd_cells zynq]
 
-# AXI-DMA: leva a varredura da DDR ate o acelerador, como AXI4-Stream
+# AXI-DMA: leva a varredura da DDR ao acelerador, como AXI4-Stream
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma dma
 set_property -dict [list \
   CONFIG.c_include_sg {0} \
@@ -75,49 +100,75 @@ set_property -dict [list \
   CONFIG.c_m_axis_mm2s_tdata_width {32}] [get_bd_cells dma]
 
 # O acelerador
-create_bd_cell -type ip -vlnv unb:user:lidar_accel_axi accel
+create_bd_cell -type ip -vlnv $ACCEL_VLNV accel
 
-# Conexoes
+# Stream: DMA -> acelerador
 connect_bd_intf_net [get_bd_intf_pins dma/M_AXIS_MM2S] [get_bd_intf_pins accel/S_AXIS]
+# Interrupcao: acelerador -> ARM
 connect_bd_net [get_bd_pins accel/irq] [get_bd_pins zynq/IRQ_F2P]
 
+# AXI4-Lite: ARM -> acelerador e ARM -> DMA
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
   -config {Master "/zynq/M_AXI_GP0" Clk "Auto"} [get_bd_intf_pins accel/S_AXI]
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
   -config {Master "/zynq/M_AXI_GP0" Clk "Auto"} [get_bd_intf_pins dma/S_AXI_LITE]
+# Caminho de memoria: DMA -> DDR (via HP0)
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
   -config {Master "/dma/M_AXI_MM2S" Slave "/zynq/S_AXI_HP0" Clk "Auto"} \
   [get_bd_intf_pins zynq/S_AXI_HP0]
+
+# BUG 2 (corrigido): o acelerador declara relogio/reset SEPARADOS para o stream
+# (s_axis_aclk / s_axis_aresetn). O RTL usa um unico dominio -- eles existem so
+# para o packager associar um clock a interface AXI4-Stream. A automacao do AXI4
+# conecta apenas os do AXI4-Lite, e o validate_bd_design falharia com os do
+# stream soltos. Amarramos os dois ao MESMO relogio e reset.
+set clk_net [get_bd_nets -of_objects [get_bd_pins accel/s_axi_aclk]]
+set rst_net [get_bd_nets -of_objects [get_bd_pins accel/s_axi_aresetn]]
+connect_bd_net -net $clk_net [get_bd_pins accel/s_axis_aclk]
+connect_bd_net -net $rst_net [get_bd_pins accel/s_axis_aresetn]
 
 regenerate_bd_layout
 validate_bd_design
 save_bd_design
 
 #-------------------------------------------------------------------------------
-# Exporta a FIGURA do block design (o print do slide)
+# A FIGURA do block design (o print do slide)
 #-------------------------------------------------------------------------------
-write_bd_layout -force -format pdf -orientation landscape $REP/block_design.pdf
 write_bd_layout -force -format png -orientation landscape $REP/block_design.png
-
-# Wrapper HDL e implementacao (para os numeros do sistema completo)
-make_wrapper -files [get_files system.bd] -top
-add_files -norecurse $OUT/$PROJ/$PROJ.gen/sources_1/bd/system/hdl/system_wrapper.v
-set_property top system_wrapper [current_fileset]
-update_compile_order -fileset sources_1
-
-launch_runs impl_1 -to_step write_bitstream -jobs 8
-wait_on_run impl_1
-open_run impl_1
-
-report_utilization        -file $REP/bd_utilization.rpt
-report_power              -file $REP/bd_power.rpt
-report_timing_summary     -file $REP/bd_timing_summary.rpt
-
-# Exporta o XSA (para o Vitis, se forem rodar no ARM de verdade)
-write_hw_platform -fixed -include_bit -force $OUT/system.xsa
+if {[catch {write_bd_layout -force -format pdf -orientation landscape \
+            $REP/block_design.pdf} err]} {
+  puts "AVISO: nao gerou o PDF ($err). O PNG basta para o slide."
+}
 
 puts "\n=========================================================="
-puts "  block_design.pdf / .png  -> vivado/reports/  (para o slide)"
-puts "  bd_timing_summary.rpt, bd_power.rpt, bd_utilization.rpt"
-puts "  system.xsa               -> para o Vitis (driver no ARM)"
+puts "  FIGURA: vivado/reports/block_design.png  (para o slide)"
+puts "  Mapa de enderecos (para o driver do ARM):"
+foreach seg [get_bd_addr_segs -of_objects [get_bd_cells accel]] {
+  puts "    $seg -> [get_property OFFSET $seg] (+[get_property RANGE $seg])"
+}
 puts "==========================================================\n"
+
+#-------------------------------------------------------------------------------
+# Implementacao do sistema completo -- OPCIONAL (set ::RUN_IMPL 1)
+#-------------------------------------------------------------------------------
+if {$::RUN_IMPL} {
+  make_wrapper -files [get_files system.bd] -top
+  add_files -norecurse $OUT/$PROJ/$PROJ.gen/sources_1/bd/system/hdl/system_wrapper.v
+  set_property top system_wrapper [current_fileset]
+  update_compile_order -fileset sources_1
+
+  launch_runs impl_1 -to_step write_bitstream -jobs 8
+  wait_on_run impl_1
+  open_run impl_1
+
+  report_utilization    -file $REP/bd_utilization.rpt
+  report_power          -file $REP/bd_power.rpt
+  report_timing_summary -file $REP/bd_timing_summary.rpt
+  write_hw_platform -fixed -include_bit -force $OUT/system.xsa
+
+  puts "  system.xsa gerado -> para o Vitis (driver no ARM)"
+} else {
+  puts "Implementacao do sistema NAO foi rodada (os numeros de timing/potencia"
+  puts "ja vieram do build_vivado.tcl, e o modulo acelerador e o mesmo)."
+  puts "Para rodar assim mesmo:  set ::RUN_IMPL 1  antes do source."
+}
