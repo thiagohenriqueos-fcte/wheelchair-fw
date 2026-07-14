@@ -88,8 +88,18 @@ create_bd_design "system"
 
 # Zynq PS (o ARM)
 create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7 zynq
+
+# BUG 4 (corrigido): apply_board_preset "1" exige que o projeto tenha um
+# board_part (arquivos de placa da ZedBoard instalados). Criamos o projeto so com
+# a PECA (-part xc7z020clg484-1), entao nao ha preset a aplicar e a automacao
+# falha. Com preset "0" o PS7 sobe na configuracao padrao -- suficiente para o
+# block design, que aqui serve para DEMONSTRAR a arquitetura e gerar a figura,
+# nao para gravar na placa. (Para gravar de verdade, crie o projeto com
+# -board_part digilentinc.com:zedboard:part0:1.0 e volte o preset para "1".)
 apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
-  -config {make_external "FIXED_IO, DDR" apply_board_preset "1"} [get_bd_cells zynq]
+  -config {make_external "FIXED_IO, DDR" apply_board_preset "0" \
+           Master "Disable" Slave "Disable"} [get_bd_cells zynq]
+
 # porta HP (o DMA acessa a DDR por ela) e entrada de interrupcao do PL
 set_property -dict [list \
   CONFIG.PCW_USE_S_AXI_HP0 {1} \
@@ -134,24 +144,41 @@ connect_bd_net -net $clk_net [get_bd_pins accel/s_axis_aclk]
 connect_bd_net -net $rst_net [get_bd_pins accel/s_axis_aresetn]
 
 regenerate_bd_layout
-validate_bd_design
 save_bd_design
 
 #-------------------------------------------------------------------------------
 # A FIGURA do block design (o print do slide)
+#
+# Gerada ANTES do validate_bd_design de proposito: o objetivo deste script e a
+# figura. Se a validacao reclamar de algum detalhe (endereco nao mapeado, por
+# exemplo), o diagrama ja esta em disco e a apresentacao nao fica sem ele.
 #-------------------------------------------------------------------------------
-write_bd_layout -force -format png -orientation landscape $REP/block_design.png
-if {[catch {write_bd_layout -force -format pdf -orientation landscape \
-            $REP/block_design.pdf} err]} {
-  puts "AVISO: nao gerou o PDF ($err). O PNG basta para o slide."
+if {[catch {write_bd_layout -force -format png -orientation landscape \
+            $REP/block_design.png} err]} {
+  puts "ERRO ao gerar o PNG: $err"
+} else {
+  puts "\n>>> FIGURA GERADA: vivado/reports/block_design.png\n"
+}
+catch {write_bd_layout -force -format pdf -orientation landscape $REP/block_design.pdf}
+
+# Agora sim, a validacao -- se falhar, ja temos a figura.
+if {[catch {validate_bd_design} err]} {
+  puts "\nAVISO: validate_bd_design reclamou:"
+  puts "  $err"
+  puts "A FIGURA ja foi gerada e serve para o slide. Para gravar na placa de"
+  puts "verdade, resolva o aviso acima (tipicamente mapeamento de enderecos).\n"
+} else {
+  puts ">>> validate_bd_design: OK\n"
+  save_bd_design
 }
 
-puts "\n=========================================================="
-puts "  FIGURA: vivado/reports/block_design.png  (para o slide)"
+puts "=========================================================="
 puts "  Mapa de enderecos (para o driver do ARM):"
-foreach seg [get_bd_addr_segs -of_objects [get_bd_cells accel]] {
-  puts "    $seg -> [get_property OFFSET $seg] (+[get_property RANGE $seg])"
-}
+if {[catch {
+  foreach seg [get_bd_addr_segs -of_objects [get_bd_cells accel]] {
+    puts "    $seg -> [get_property OFFSET $seg] (+[get_property RANGE $seg])"
+  }
+} err]} { puts "    (nao disponivel: $err)" }
 puts "==========================================================\n"
 
 #-------------------------------------------------------------------------------
