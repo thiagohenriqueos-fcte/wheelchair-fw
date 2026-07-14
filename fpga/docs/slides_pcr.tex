@@ -1,0 +1,544 @@
+% =============================================================================
+%  Slides -- Projeto Final PCR / Co-Projeto HW-SW -- UnB 2026/1
+%  Apresentacao de 20 min.
+%
+%  Compilacao: pdflatex slides_pcr.tex  (2x)
+%  Requer os .dat em docs/figs/ (gerados por golden/gen_figs.py)
+%
+%  ==> Slides marcados com [VIVADO] precisam dos prints/numeros da sintese.
+% =============================================================================
+\documentclass[aspectratio=169, 11pt]{beamer}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian]{babel}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{siunitx}
+\pgfplotsset{compat=1.17}
+\usetikzlibrary{arrows.meta, positioning, calc}
+\sisetup{output-decimal-marker={,}}
+
+\usetheme{metropolis}
+\metroset{progressbar=frametitle, numbering=fraction}
+\definecolor{unb}{RGB}{0,70,130}
+\setbeamercolor{frametitle}{bg=unb}
+\setbeamercolor{alerted text}{fg=red!75!black}
+
+\title{Acelerador em FPGA do Supervisor LiDAR}
+\subtitle{Co-Projeto HW--SW sobre Zynq-7000 \\ \small Cadeira de rodas semi-assistida}
+\author{Vítor Gonçalves de Andrade Silva \and Thiago Henrique Oliveira Souza}
+\institute{Engenharia Eletrônica --- FCTE/UnB}
+\date{2026/1}
+
+\begin{document}
+
+\maketitle
+
+% =============================================================================
+\begin{frame}{O sistema}
+\begin{columns}[T]
+\begin{column}{0.55\textwidth}
+Cadeira de rodas motorizada \textbf{semi-assistida}.
+
+\vspace{4mm}
+\alert{Princípio de segurança:}
+\begin{center}
+\large o sistema pode \textbf{FREAR} ou \textbf{DESVIAR},\\
+mas \textbf{nunca ACELERAR}.
+\end{center}
+\vspace{2mm}
+A iniciativa é sempre do usuário.
+
+\vspace{4mm}
+\footnotesize
+\begin{itemize}
+\item Raspberry Pi 5 + ROS\,2 (percepção)
+\item ESP32-S3 (tempo real: joystick, motores, encoders)
+\item RPLIDAR C1 a \SI{10}{\hertz}, \num{720} feixes
+\end{itemize}
+\end{column}
+\begin{column}{0.45\textwidth}
+\begin{block}{O supervisor}
+A cada varredura, decide se o avanço comandado deve ser \textbf{reduzido} ou
+\textbf{interrompido}.
+\end{block}
+\vspace{2mm}
+\begin{alertblock}{Por que acelerar isto?}
+É o nó mais pesado \textbf{e} o único cuja latência tem \textbf{consequência
+física}: ela vira \textbf{centímetros} rumo ao obstáculo.
+\end{alertblock}
+\end{column}
+\end{columns}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{O algoritmo: teste de corredor}
+\begin{columns}[T]
+\begin{column}{0.42\textwidth}
+\footnotesize
+Projeta cada feixe no referencial do veículo:
+\begin{align*}
+X &= x_L + r\cos(a + \theta_L)\\
+Y &= y_L + r\sin(a + \theta_L)
+\end{align*}
+
+É obstáculo se cair no \textbf{corredor que a cadeira vai ocupar}:
+\[ |Y| \le W/2 \quad\text{e}\quad X > X_f \]
+
+\vspace{3mm}
+Para cada um dos \alert{$K=19$} candidatos de desvio ($-45^\circ$ a $+45^\circ$),
+gira-se o ponto e repete-se o teste.
+\end{column}
+\begin{column}{0.58\textwidth}
+\begin{center}
+\begin{tikzpicture}[scale=0.85]
+\begin{axis}[width=7.2cm, height=5cm,
+  xlabel={$X$ (m)}, ylabel={$Y$ (m)},
+  xmin=0, xmax=2.6, ymin=-1.0, ymax=1.3,
+  tick label style={font=\tiny}, label style={font=\tiny},
+  grid=major, grid style={gray!20}]
+  \addplot[only marks, mark=*, mark size=0.4pt, gray!50]
+    table[x=x, y=y] {figs/scan_out.dat};
+  \addplot[only marks, mark=*, mark size=1pt, red]
+    table[x=x, y=y] {figs/scan_in.dat};
+  \draw[blue, very thick] (axis cs:0.687,-0.305) rectangle (axis cs:2.6,0.305);
+  \draw[fill=black] (axis cs:0.667,0.336) circle (2pt);
+  \node[font=\tiny, anchor=south] at (axis cs:0.667,0.38) {LiDAR};
+\end{axis}
+\end{tikzpicture}
+\end{center}
+\centering\tiny Varredura \textbf{real} da cadeira. Vermelho: no corredor.
+\end{column}
+\end{columns}
+
+\vspace{2mm}
+\centering
+\alert{\textbf{$N \times K = 720 \times 19 = 9.918$ avaliações por varredura}}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Por que este bloco: um defeito real de segurança}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\footnotesize
+O supervisor \textbf{antigo} media a folga com um \textbf{cone} ancorado no
+sensor.
+
+\vspace{2mm}
+Só valeria se o LiDAR estivesse \textbf{no eixo} da cadeira.
+
+\vspace{2mm}
+Ele está \alert{\SI{33.6}{\centi\metre} fora do eixo}.
+
+\vspace{3mm}
+\begin{alertblock}{Consequência}
+A metade \textbf{direita} da cadeira ficava \textbf{cega} --- e a cobertura
+\textbf{piora} quanto mais \textbf{perto} está o obstáculo.
+
+\vspace{1mm}
+A cadeira \textbf{atropelava} obstáculos à direita.
+\end{alertblock}
+\end{column}
+\begin{column}{0.5\textwidth}
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=6.2cm, height=4.6cm,
+  xlabel={distância do obstáculo (m)}, ylabel={cobertura (\%)},
+  ymin=0, ymax=105, xmin=0.3, xmax=1.5,
+  tick label style={font=\tiny}, label style={font=\tiny},
+  legend style={font=\tiny, at={(0.98,0.03)}, anchor=south east},
+  grid=major, grid style={gray!20}]
+  \addplot[very thick, red] table[x=d, y=cone30] {figs/cobertura.dat};
+  \addlegendentry{cone $\pm30^\circ$}
+  \addplot[very thick, orange, dashed] table[x=d, y=cone20] {figs/cobertura.dat};
+  \addlegendentry{cone $\pm20^\circ$}
+  \addplot[very thick, blue, densely dotted] coordinates {(0.3,100) (1.5,100)};
+  \addlegendentry{corredor}
+\end{axis}
+\end{tikzpicture}
+\end{center}
+\centering\tiny A \SI{0.60}{\metre} (zona de parada) o cone vê só \SI{52}{\percent}.
+\end{column}
+\end{columns}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Particionamento HW/SW}
+\begin{center}
+\begin{tabular}{@{}llc@{}}
+\toprule
+\textbf{Etapa} & \textbf{Custo} & \textbf{Onde} \\
+\midrule
+Projeção + teste de corredor & $O(N\cdot K) = \mathbf{9.918}$ & \alert{\textbf{FPGA}} \\
+Função custo + \emph{argmin} & $O(K) = 19$ & ARM \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{5mm}
+\begin{block}{Por que \emph{não} levar tudo para hardware?}
+A função custo são \textbf{19 comparações} --- o ganho seria irrisório.
+
+Em compensação, é nela que moram os \textbf{pesos ajustados em campo}
+($w_{\text{obs}}$, $w_{\text{dev}}$, $K_{\text{assist}}$), retocados a cada ensaio.
+
+\vspace{2mm}
+\centering\alert{Congelá-los em RTL trocaria flexibilidade por nada.}
+\end{block}
+
+\vspace{2mm}
+\centering\footnotesize
+É exatamente o \emph{trade-off} que o co-projeto existe para arbitrar.
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Arquitetura de hardware}
+\begin{center}
+\begin{tikzpicture}[font=\small, node distance=8mm,
+  blk/.style={draw, rounded corners=2pt, minimum height=11mm, minimum width=20mm,
+              inner sep=4pt, align=center},
+  arr/.style={-Latex, thick}]
+  \node[blk, fill=gray!10] (in) {AXI4-Stream\\\scriptsize $(r_i,\theta_i)$};
+  \node[blk, right=of in, fill=blue!12] (cor) {CORDIC\\\scriptsize 16 estágios\\\alert{\scriptsize 0 DSP}};
+  \node[blk, right=of cor, fill=gray!10] (prj) {projeção\\\scriptsize $X_i,\,Y_i$};
+  \node[blk, right=of prj, fill=orange!18, minimum height=20mm] (lanes)
+       {\textbf{19 pistas}\\\textbf{paralelas}\\\alert{\scriptsize 76 DSP}};
+  \node[blk, right=of lanes, fill=gray!10] (out) {AXI4-Lite\\\scriptsize 19 folgas};
+  \draw[arr] (in) -- (cor);
+  \draw[arr] (cor) -- node[above, font=\tiny] {$\cos,\sin$} (prj);
+  \draw[arr] (prj) -- (lanes);
+  \draw[arr] (lanes) -- (out);
+\end{tikzpicture}
+\end{center}
+
+\vspace{2mm}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\footnotesize
+\textbf{CORDIC compartilhado} ($O(N)$)
+\begin{itemize}\footnotesize
+\item Só somadores e \emph{shifts} $\Rightarrow$ \alert{zero DSP}
+\item \emph{Por que não LUT de seno?} O ângulo depende da \textbf{calibração},
+reescrita em tempo de execução via AXI4-Lite.
+\end{itemize}
+\end{column}
+\begin{column}{0.5\textwidth}
+\footnotesize
+\textbf{19 pistas replicadas} ($O(N\cdot K)$)
+\begin{itemize}\footnotesize
+\item $\cos\delta_k,\sin\delta_k$ são \textbf{constantes de síntese}
+\item $\Rightarrow$ 4 multiplicadores fixos por pista
+\item Avaliam \textbf{no mesmo ciclo} o que o software \textbf{itera}
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vspace{2mm}
+\centering\alert{Vazão: \textbf{1 feixe/ciclo}, sem bolhas.}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Verificação: equivalência bit a bit}
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\footnotesize
+\begin{enumerate}
+\item Modelo \textbf{ponto fixo} (Python) emula o RTL \emph{exatamente}
+\item Modelo \textbf{float} = referência física
+\item O modelo gera \textbf{estímulo} e \textbf{esperado}
+\item Testbench VHDL lê os arquivos e compara as 19 folgas
+\end{enumerate}
+
+\vspace{3mm}
+\begin{block}{\footnotesize Detalhe que evita um erro invisível}
+\scriptsize As constantes do RTL (\texttt{cordic\_pkg.vhd}) são \textbf{geradas}
+pelo mesmo modelo. RTL e referência casam \textbf{por construção} --- não por
+transcrição manual.
+\end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+\begin{exampleblock}{Resultado (GHDL)}
+\scriptsize
+\texttt{varredura 0: EQUIVALENCIA OK}\\
+\texttt{varredura 1: EQUIVALENCIA OK}\\
+\texttt{varredura 2: EQUIVALENCIA OK}
+\vspace{1mm}
+
+\normalsize\centering
+\textbf{Zero divergência}
+\end{exampleblock}
+
+\vspace{2mm}
+\footnotesize
+O estímulo \textbf{não é sintético}: são três varreduras \alert{reais} da cadeira,
+com um balde a \SI{21}{\centi\metre} à direita --- o antigo ponto cego.
+\end{column}
+\end{columns}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Precisão: o achado do trabalho}
+\begin{center}
+\alert{\Large O primeiro modelo em ponto fixo errava \textbf{\SI{402}{\milli\metre}}.}
+\end{center}
+
+\vspace{3mm}
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\footnotesize
+Não era arredondamento. Era \textbf{estouro de faixa}:
+\[ \theta = a_{\min} + i\,\Delta a + \theta_L \;\to\; \alert{\SI{-5.85}{\radian}} \]
+\vspace{-3mm}
+\[ \text{Q3.13 comporta apenas } \pm\SI{4.0}{\radian} \]
+
+\vspace{2mm}
+O ângulo \textbf{saturava} $\Rightarrow$ o feixe era projetado numa direção
+completamente errada.
+
+\vspace{2mm}
+\textbf{Correção:} envolver $\theta$ em $[-\pi,\pi)$.
+\end{column}
+\begin{column}{0.48\textwidth}
+\centering
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& \scriptsize médio & \scriptsize máximo \\
+\midrule
+\scriptsize $\theta$ saturado & \scriptsize \SI{17.89}{\milli\metre} & \alert{\scriptsize \SI{402}{\milli\metre}} \\
+\scriptsize $\theta$ envolvido & \scriptsize \textbf{\SI{0.99}{\milli\metre}} & \scriptsize \textbf{\SI{5.27}{\milli\metre}} \\
+\bottomrule
+\end{tabular}
+
+\vspace{4mm}
+\footnotesize
+LSB de Q6.10 $=$ \SI{0.98}{\milli\metre}
+
+$\Rightarrow$ erro final $\approx$ \textbf{1 LSB}
+
+$\Rightarrow$ \SI{0.9}{\percent} da zona de parada
+\end{column}
+\end{columns}
+
+\vspace{4mm}
+\begin{alertblock}{Lição}
+\centering
+Em ponto fixo, a \textbf{FAIXA} costuma ser mais crítica que a \textbf{RESOLUÇÃO}.\\
+\footnotesize Perdemos \SI{402}{\milli\metre} por 3 bits de parte inteira --- não por falta de bits fracionários.
+\end{alertblock}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Desempenho}
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Implementação} & \textbf{Tempo/varredura} & \multicolumn{2}{c}{\textbf{Speedup}} \\
+ & & \scriptsize vs escalar & \scriptsize vs NumPy \\
+\midrule
+Software escalar (Pi 5) & \SI{3.54}{\milli\second} & --- & --- \\
+Software NumPy (Pi 5) & \SI{0.488}{\milli\second} & $7{,}3\times$ & --- \\
+\alert{\textbf{HW \SI{100}{\mega\hertz}}} \scriptsize(751 ciclos) & \alert{\textbf{\SI{7.51}{\micro\second}}} & \alert{$\mathbf{472\times}$} & \alert{$\mathbf{65\times}$} \\
+HW \SI{150}{\mega\hertz} & \SI{5.01}{\micro\second} & $707\times$ & $98\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{2mm}
+\centering\scriptsize
+\emph{Baseline} medido na própria Pi 5. Ciclos de HW \textbf{medidos na simulação}
+--- não estimados.
+
+\vspace{4mm}
+\begin{alertblock}{Análise crítica: o ganho de tempo \emph{não era necessário}}
+\footnotesize
+O LiDAR entrega uma varredura a cada \SI{100}{\milli\second}. Mesmo o software
+vetorizado usa só \textbf{\SI{0.5}{\percent}} desse orçamento --- \textbf{não
+estávamos perdendo prazos}.
+\end{alertblock}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Então qual é o valor real?}
+\begin{enumerate}
+\item \textbf{Alívio de CPU} \\
+      \footnotesize Libera \SI{8.3}{\percent} numa Pi que também roda SLAM e EKF ---
+      e que já \textbf{congelou} por exaustão de memória.
+      \vspace{3mm}
+\item \textbf{Latência determinística} \alert{$\leftarrow$ o mais importante} \\
+      \footnotesize Um nó Python está sujeito ao escalonador de um Linux
+      não-preemptivo. Num laço de \textbf{segurança}, determinismo vale mais que
+      média baixa.
+      \vspace{3mm}
+\item \textbf{Orçamento para crescer} \\
+      \footnotesize Dá para aumentar $K$ ou a densidade angular sem custo de tempo:
+      o gargalo passa a ser o \textbf{sensor}.
+\end{enumerate}
+
+\vspace{4mm}
+\centering
+\footnotesize Reportamos isso explicitamente porque a leitura oposta ---
+``aceleramos, logo melhorou'' --- seria \textbf{desonesta com os dados}.
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Síntese: recursos, timing e potência \hfill [VIVADO]}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\centering
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Recurso} & \textbf{Usado} & \textbf{\%} \\
+\midrule
+LUT & \alert{---} & \alert{---} \\
+FF & \alert{---} & \alert{---} \\
+DSP48 & \alert{---} & \alert{---} \\
+BRAM & \alert{---} & \alert{---} \\
+\midrule
+WNS & \multicolumn{2}{c}{\alert{--- ns}} \\
+$F_{\max}$ & \multicolumn{2}{c}{\alert{--- MHz}} \\
+Potência & \multicolumn{2}{c}{\alert{--- W}} \\
+\bottomrule
+\end{tabular}
+
+\vspace{2mm}
+\scriptsize \texttt{xc7z020} (ZedBoard)
+\end{column}
+\begin{column}{0.5\textwidth}
+\footnotesize
+\textbf{Previsão analítica} (a confrontar):
+\begin{itemize}\footnotesize
+\item \textbf{78 DSP48} de 220 (\SI{35}{\percent}) \\
+      \scriptsize 76 das pistas $+$ 2 da projeção
+\item \textbf{0 BRAM} --- não há memória interna, o fluxo é puramente
+      \emph{streaming}
+\item \textbf{Caminho crítico}: o somador de 32 bits que soma os dois produtos da
+      pista, antes do truncamento
+\end{itemize}
+
+\vspace{3mm}
+\centering
+\alert{\scriptsize [COLAR AQUI: print do \\ \texttt{timing\_summary} e \texttt{power}]}
+\end{column}
+\end{columns}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Block design: ARM + AXI-DMA + acelerador \hfill [VIVADO]}
+\begin{center}
+\begin{tikzpicture}[font=\scriptsize, node distance=10mm,
+  blk/.style={draw, rounded corners=2pt, minimum height=13mm, minimum width=26mm,
+              align=center, inner sep=4pt},
+  arr/.style={-Latex, thick}]
+  \node[blk, fill=green!12] (ps) {\textbf{Zynq PS}\\ARM Cortex-A9\\\scriptsize DDR: /scan};
+  \node[blk, right=22mm of ps, fill=blue!12] (dma) {\textbf{AXI-DMA}};
+  \node[blk, right=18mm of dma, fill=orange!18] (acc) {\textbf{lidar\_accel}\\\scriptsize CORDIC + 19 pistas};
+  \draw[arr] (ps) -- node[above, font=\tiny] {AXI4-Lite} node[below, font=\tiny] {(GP0)} (dma);
+  \draw[arr] (dma) -- node[above, font=\tiny] {AXI4-Stream} (acc);
+  \draw[arr] (ps.south) -- ++(0,-7mm) -| node[pos=0.25, below, font=\tiny] {AXI4-Lite: calibração + 19 folgas} (acc.south);
+  \draw[arr, red] (acc.north) -- ++(0,7mm) -| node[pos=0.25, above, font=\tiny] {IRQ} (ps.north);
+\end{tikzpicture}
+\end{center}
+
+\vspace{3mm}
+\footnotesize
+\begin{itemize}
+\item O ARM guarda a varredura na \textbf{DDR}; o \textbf{AXI-DMA} a transmite como
+      \emph{stream} ao acelerador
+\item Resultado (19 folgas) volta por \textbf{AXI4-Lite}; a \textbf{IRQ} avisa o fim
+      --- sem espera ocupada
+\item \emph{Stream} para o fluxo volumoso; mapeado em memória para os escalares.
+\end{itemize}
+
+\vspace{2mm}
+\centering
+\alert{\scriptsize [COLAR AQUI: print do block design do Vivado]}
+\end{frame}
+
+% =============================================================================
+\begin{frame}{Conclusões}
+\begin{block}{O que foi alcançado}
+\footnotesize
+\alert{$472\times$} vs software escalar, \alert{$65\times$} vs vetorizado, com
+equivalência \textbf{bit a bit} verificada sobre \textbf{dados reais} da cadeira.
+\end{block}
+
+\begin{alertblock}{Análise crítica --- esperado vs alcançado}
+\footnotesize
+O \emph{speedup} veio, mas \textbf{o ganho de tempo não era necessário}: o software
+já cabia no orçamento do sensor. O benefício legítimo é o \textbf{alívio de CPU} e,
+sobretudo, o \textbf{determinismo} da latência num laço de segurança.
+\end{alertblock}
+
+\begin{exampleblock}{O resultado mais transferível}
+\footnotesize
+Não é o \emph{speedup}: é o \textbf{defeito de faixa em Q3.13}. Um ângulo de
+\SI{-5.85}{\radian} saturando num formato de $\pm\SI{4}{\radian}$ produziu
+\SI{402}{\milli\metre} de erro \textbf{silencioso} --- o RTL não acusa, a simulação
+``roda''.
+
+\vspace{1mm}
+\centering\alert{Foi o \emph{golden model}, não a inspeção de ondas, que o encontrou.}
+\end{exampleblock}
+\end{frame}
+
+% =============================================================================
+\begin{frame}[standout]
+Obrigado!
+
+\vspace{5mm}
+\small
+\texttt{fpga/} --- RTL, golden model, testbench, scripts Vivado
+
+\vspace{2mm}
+\texttt{bash sim/run\_ghdl.sh} \\
+\scriptsize reproduz a prova de equivalência em um comando
+\end{frame}
+
+% =============================================================================
+\appendix
+\begin{frame}{Backup: formato de ponto fixo}
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Grandeza} & \textbf{Formato} & \textbf{Faixa} & \textbf{LSB} \\
+\midrule
+distâncias, coords. & Q6.10 & $\pm\num{32}$\,m & \SI{0.98}{\milli\metre} \\
+$\cos$, $\sin$ & Q1.14 & $\pm 2$ & \num{6.1e-5} \\
+ângulos & Q3.13 & \alert{$\pm\SI{4.0}{\radian}$} & \SI{1.22e-4}{\radian} \\
+\bottomrule
+\end{tabular}
+
+\vspace{6mm}
+\footnotesize
+A faixa de Q3.13 (\alert{$\pm\SI{4}{\radian}$}) foi a origem do defeito de
+\SI{402}{\milli\metre}: $\theta$ chega a \SI{-5.85}{\radian}.
+\end{frame}
+
+\begin{frame}{Backup: por que CORDIC e não LUT?}
+\footnotesize
+Uma LUT de seno exigiria uma ROM indexada pelo \textbf{índice do feixe}.
+
+\vspace{2mm}
+Isso só funcionaria se \texttt{angle\_min}, o incremento e o \emph{yaw} fossem
+\textbf{fixos em síntese}.
+
+\vspace{2mm}
+Mas eles são \alert{parâmetros de calibração} --- reescritos em tempo de execução
+por AXI4-Lite sempre que o LiDAR é remontado.
+
+\vspace{4mm}
+\begin{block}{CORDIC}
+\footnotesize
+\begin{itemize}
+\item Aceita \textbf{qualquer} ângulo em tempo de execução
+\item Só somadores e deslocamentos cabeados $\Rightarrow$ \alert{zero DSP48}
+\item 16 estágios pipelinados $\Rightarrow$ 1 resultado/ciclo
+\item Redução de quadrante na entrada (o laço só converge para
+      $|z| \le \SI{1.7434}{\radian}$)
+\end{itemize}
+\end{block}
+\end{frame}
+
+\end{document}

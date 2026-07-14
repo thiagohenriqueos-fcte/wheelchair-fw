@@ -1,0 +1,527 @@
+% =============================================================================
+%  Acelerador em FPGA do Supervisor de Seguranca LiDAR de uma Cadeira de Rodas
+%  Projeto Final -- PCR / Co-Projeto Hardware-Software -- UnB 2026/1
+%
+%  Compilacao: pdflatex relatorio_pcr.tex  (2x, por causa das referencias)
+%  Requer os .dat em docs/figs/ (gerados por golden/gen_figs.py)
+%
+%  ==> CAMPOS A PREENCHER APOS RODAR O VIVADO: procure por "\vivado{" no texto.
+%      Os valores estao em fpga/vivado/reports/.
+% =============================================================================
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{listings}
+\usepackage{siunitx}
+\pgfplotsset{compat=1.17}
+\usetikzlibrary{arrows.meta, positioning, fit, calc}
+
+\sisetup{output-decimal-marker={,}, per-mode=symbol, detect-all}
+
+% Marca os numeros que so o Vivado fornece. Depois de rodar a sintese, troque
+% \vivado{X} pelo valor -- ou redefina a macro para imprimir sem destaque.
+\newcommand{\vivado}[1]{\textcolor{red}{\textbf{#1}}}
+
+\lstset{basicstyle=\ttfamily\scriptsize, breaklines=true, columns=fullflexible,
+        frame=single, framesep=3pt, xleftmargin=2pt}
+
+\begin{document}
+
+\title{Acelerador em FPGA para o Supervisor de Seguran\c{c}a\\
+LiDAR de uma Cadeira de Rodas Semi-Assistida:\\
+Co-Projeto Hardware--Software sobre Zynq-7000}
+
+\author{
+\IEEEauthorblockN{Vítor Gonçalves de Andrade Silva}
+\IEEEauthorblockA{Engenharia Eletrônica --- FCTE/UnB\\
+Email: 261025182@aluno.unb.br}
+\and
+\IEEEauthorblockN{Thiago Henrique Oliveira Souza}
+\IEEEauthorblockA{Engenharia Eletrônica --- FCTE/UnB\\
+Email: 180131672@aluno.unb.br}
+}
+
+\maketitle
+
+% =============================================================================
+\begin{abstract}
+Este trabalho acelera em FPGA o n\'ucleo do supervisor de seguran\c{c}a de uma
+cadeira de rodas motorizada semi-assistida. O supervisor decide, a cada varredura
+de LiDAR, se o avan\c{c}o comandado pelo usu\'ario deve ser reduzido ou
+interrompido: \'e o bloco de maior custo do sistema e o \'unico cuja lat\^encia
+tem consequ\^encia f\'isica direta, pois determina a dist\^ancia percorrida antes
+da frenagem. O algoritmo projeta os \num{720} feixes da varredura no referencial
+do ve\'iculo e testa, para \num{19} dire\c{c}\~oes candidatas de desvio, se cada
+ponto cai no corredor que a cadeira ocupar\'a --- \num{9918} avalia\c{c}\~oes por
+varredura. Prop\~oe-se um particionamento em que o custo $O(N\cdot K)$ migra para
+hardware e o custo $O(K)$ (fun\c{c}\~ao custo e escolha do candidato) permanece no
+ARM, onde residem os ganhos ajust\'aveis em campo. A arquitetura emprega um CORDIC
+pipelinado de \num{16} est\'agios, que n\~ao consome multiplicadores, alimentando
+\num{19} pistas paralelas cujas rota\c{c}\~oes t\^em coeficientes constantes de
+s\'intese. A comunica\c{c}\~ao usa AXI4-Stream para os feixes (via AXI-DMA) e
+AXI4-Lite para calibra\c{c}\~ao e resultados. A equival\^encia num\'erica foi
+verificada bit a bit contra um modelo de refer\^encia em ponto fixo, sobre tr\^es
+varreduras \emph{reais} capturadas na cadeira; as tr\^es passam. A an\'alise de
+precis\~ao revelou um defeito real de formato: o \^angulo do feixe atinge
+\SI{-5.85}{\radian} e n\~ao cabe em Q3.13, saturando e projetando o ponto no lugar
+errado (erro de \SI{402}{\milli\metre}); com o \^angulo envolvido em
+$[-\pi,\pi)$ o erro cai a \SI{0.99}{\milli\metre} m\'edio, cerca de um LSB. Medido
+na Raspberry~Pi~5, o software gasta \SI{3.54}{\milli\second} (escalar) ou
+\SI{0.488}{\milli\second} (vetorizado); o hardware conclui em \num{751} ciclos
+(\SI{7.51}{\micro\second} a \SI{100}{\mega\hertz}), \num{472}$\times$ e
+\num{65}$\times$ mais r\'apido, respectivamente.
+\end{abstract}
+
+% =============================================================================
+\section{Introdu\c{c}\~ao}
+
+Cadeiras de rodas motorizadas s\~ao inacess\'iveis a uma parcela expressiva dos
+usu\'arios que mais precisariam delas: pesquisa cl\'inica cl\'assica aponta que
+profissionais de reabilita\c{c}\~ao consideram muitos pacientes inaptos ao uso
+justamente pela inadequa\c{c}\~ao das interfaces de controle~\cite{fehr2000}.
+Espasmos e comandos acidentais no joystick produzem acelera\c{c}\~oes repentinas
+e colis\~oes.
+
+O projeto no qual este trabalho se insere converte uma cadeira comercial em um
+ve\'iculo semi-assistido sob um princ\'ipio de seguran\c{c}a expl\'icito: o
+sistema de alto n\'ivel pode \textbf{frear ou desviar}, mas \textbf{nunca
+acelerar}; a iniciativa de movimento \'e sempre do usu\'ario. Um supervisor
+executando em Raspberry~Pi~5 com ROS\,2~\cite{ros2docs} l\^e um LiDAR RPLIDAR~C1 e
+atenua o comando do joystick antes de repass\'a-lo ao firmware de tempo real em
+ESP32-S3.
+
+\subsection{O bloco a acelerar e por qu\^e}
+
+O supervisor \'e, disparadamente, o n\'o mais pesado do sistema: medimos
+\SI{17.7}{\percent} da CPU da Pi~5 na implementa\c{c}\~ao escalar e
+\SI{8.3}{\percent} ap\'os vetoriza\c{c}\~ao. Mais importante que o custo, por\'em,
+\'e a natureza da sua lat\^encia: \emph{ela tem consequ\^encia f\'isica}. O
+supervisor s\'o corta o comando de avan\c{c}o; a cadeira ainda percorre uma
+dist\^ancia por in\'ercia. Todo atraso entre a chegada da varredura e a decis\~ao
+se traduz em cent\'imetros adicionais rumo ao obst\'aculo. Trata-se, portanto, de
+um caso em que acelerar n\~ao \'e otimiza\c{c}\~ao, e sim seguran\c{c}a --- o que
+motiva o co-projeto.
+
+A escolha \'e ainda mais pertinente porque uma revis\~ao recente do supervisor
+revelou uma falha geom\'etrica de seguran\c{c}a. A folga frontal era medida por um
+\emph{cone angular} ancorado no sensor, constru\c{c}\~ao v\'alida apenas se o
+LiDAR estivesse sobre o eixo longitudinal do ve\'iculo. Estando ele
+\SI{0.336}{\metre} fora do eixo, o cone varre uma faixa deslocada e a metade
+direita da cadeira fica cega justamente nas curtas dist\^ancias
+(Fig.~\ref{fig:cobertura}). A corre\c{c}\~ao substituiu o cone pelo teste do
+\emph{corredor f\'isico} que a cadeira ocupar\'a --- e \'e esse algoritmo,
+correto por\'em mais caro, que se acelera aqui.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=4.2cm,
+  xlabel={dist\^ancia do obst\'aculo (m)},
+  ylabel={cobertura (\%)}, ymin=0, ymax=105, xmin=0.3, xmax=1.5,
+  legend pos=south east, legend style={font=\scriptsize},
+  grid=major, grid style={gray!20}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}]
+  \addplot[thick, red!70!black] table[x=d, y=cone30] {figs/cobertura.dat};
+  \addlegendentry{cone $\pm30^\circ$}
+  \addplot[thick, orange, dashed] table[x=d, y=cone20] {figs/cobertura.dat};
+  \addlegendentry{cone $\pm20^\circ$}
+  \addplot[thick, blue!60!black, densely dotted] coordinates {(0.3,100) (1.5,100)};
+  \addlegendentry{corredor (proposto)}
+\end{axis}
+\end{tikzpicture}
+\caption{Fra\c{c}\~ao da largura da cadeira efetivamente monitorada. O cone
+ancorado no sensor \emph{piora} quanto mais perto est\'a o obst\'aculo, porque
+estreita enquanto o desvio lateral do v\'ertice permanece constante: a
+\SI{0.60}{\metre} cobre \SI{52}{\percent}, e a parcela n\~ao coberta \'e sempre a
+metade direita. O teste de corredor cobre \SI{100}{\percent} por
+constru\c{c}\~ao.}
+\label{fig:cobertura}
+\end{figure}
+
+\subsection{Trabalhos relacionados}
+
+A fun\c{c}\~ao custo que pontua dire\c{c}\~oes candidatas pela folga \'e
+aparentada ao \emph{Vector Field Histogram}~\cite{borenstein1991}, com a
+distin\c{c}\~ao essencial de raciocinar sobre a \emph{planta} do rob\^o e n\~ao
+sobre um cone do sensor. O CORDIC~\cite{volder1959,andraka1998} \'e a escolha
+cl\'assica para trigonometria em FPGA sem multiplicadores. O uso de aceleradores
+acoplados a processadores embarcados via AXI4 sobre Zynq segue a pr\'atica
+consolidada em~\cite{zynqbook}.
+
+% =============================================================================
+\section{Desenvolvimento}
+
+\subsection{O algoritmo}
+
+Cada retorno do LiDAR, um par $(r_i, a_i)$, \'e projetado no referencial
+\texttt{base\_link} (origem no centro do eixo traseiro):
+\begin{align}
+X_i &= x_L + r_i\cos(a_i + \theta_L), &
+Y_i &= y_L + r_i\sin(a_i + \theta_L),
+\label{eq:proj}
+\end{align}
+\noindent onde $(x_L, y_L, \theta_L)$ \'e a pose calibrada do sensor. Para avaliar
+um candidato de desvio $\delta_k$, giram-se os pontos por $-\delta_k$ em torno do
+eixo traseiro --- o centro instant\^aneo de rota\c{c}\~ao do acionamento
+diferencial:
+\begin{align}
+x^{(k)}_i &= X_i\cos\delta_k + Y_i\sin\delta_k, \\
+y^{(k)}_i &= -X_i\sin\delta_k + Y_i\cos\delta_k .
+\label{eq:rot}
+\end{align}
+O ponto \'e obst\'aculo se $|y^{(k)}_i| \le W/2$ e $x^{(k)}_i > X_f$, com folga
+$x^{(k)}_i - X_f$; a folga do candidato \'e o m\'inimo sobre os pontos. Aqui
+$W=\SI{0.61}{\metre}$ \'e a largura da cadeira e $X_f=\SI{0.667}{\metre}$ a frente
+do chassi. Note que a estrutura da pr\'opria cadeira cai \emph{atr\'as} de $X_f$ e
+\'e descartada por constru\c{c}\~ao, sem nenhum limiar arbitr\'ario de
+dist\^ancia m\'inima.
+
+Com $N=\num{720}$ feixes e $K=\num{19}$ candidatos ($\delta_k$ de $-45^\circ$ a
+$+45^\circ$, passo $5^\circ$), s\~ao \num{9918} avalia\c{c}\~oes por varredura ---
+o custo $O(N\cdot K)$ que motiva o acelerador.
+
+\subsection{Particionamento Hardware--Software}
+
+O supervisor decomp\~oe-se em duas partes de custo muito distinto
+(Tab.~\ref{tab:part}). Apenas a primeira migra para hardware.
+
+\begin{table}[!t]
+\caption{Particionamento HW/SW}
+\label{tab:part}
+\centering\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Etapa} & \textbf{Custo} & \textbf{Onde} \\
+\midrule
+Proje\c{c}\~ao + teste de corredor & $O(N\!\cdot\!K)=\num{9918}$ & \textbf{FPGA} \\
+Fun\c{c}\~ao custo + \emph{argmin} & $O(K)=\num{19}$ & ARM \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A decis\~ao de \emph{n\~ao} levar tudo para hardware \'e deliberada. A fun\c{c}\~ao
+custo s\~ao \num{19} compara\c{c}\~oes: o ganho seria irris\'orio. Em compensa\c{c}\~ao,
+\'e nela que residem os pesos ajustados em campo ($w_{\text{obs}}$,
+$w_{\text{dev}}$, $K_{\text{assist}}$), retocados a cada ensaio. Congel\'a-los em
+RTL trocaria flexibilidade por nada --- exatamente o \emph{trade-off} que o
+co-projeto existe para arbitrar.
+
+\subsection{Arquitetura de hardware}
+
+A Fig.~\ref{fig:arq} mostra o \emph{datapath}. O CORDIC \'e \textbf{compartilhado}
+porque a proje\c{c}\~ao~\eqref{eq:proj} \'e comum a todos os candidatos: o custo
+$O(N)$ \'e pago uma \'unica vez. O que se replica s\~ao as \num{19} pistas, que
+carregam o custo $O(N\cdot K)$ --- e \'e precisamente a\'i que o paralelismo
+espacial da FPGA rende: as pistas avaliam \emph{no mesmo ciclo} aquilo que o
+processador precisa iterar.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[font=\scriptsize, node distance=3.5mm,
+  blk/.style={draw, rounded corners=2pt, minimum height=7mm, inner sep=3pt,
+              fill=gray!8, align=center},
+  arr/.style={-Latex}]
+  \node[blk] (in) {AXI4-Stream\\$(r_i,\theta_i)$};
+  \node[blk, right=of in, fill=blue!8] (cor) {CORDIC\\16 est\'agios\\\textbf{0 DSP}};
+  \node[blk, right=of cor] (prj) {proje\c{c}\~ao\\$X_i, Y_i$};
+  \node[blk, right=6mm of prj, fill=orange!10, minimum height=13mm]
+       (lanes) {19 pistas\\paralelas\\\textbf{76 DSP}};
+  \node[blk, below=5mm of lanes] (out) {AXI4-Lite\\19 folgas};
+  \draw[arr] (in) -- (cor);
+  \draw[arr] (cor) -- node[above, font=\tiny] {$\cos,\sin$} (prj);
+  \draw[arr] (prj) -- (lanes);
+  \draw[arr] (lanes) -- (out);
+\end{tikzpicture}
+\caption{\emph{Datapath}. Vaz\~ao de \textbf{1 feixe/ciclo}, sem bolhas. O CORDIC
+\'e compartilhado (custo $O(N)$); as pistas s\~ao replicadas (custo $O(N\cdot K)$).}
+\label{fig:arq}
+\end{figure}
+
+\paragraph{CORDIC}
+Optou-se por CORDIC em modo rota\c{c}\~ao~\cite{volder1959}, pipelinado em
+\num{16} est\'agios, em vez de uma LUT de seno. Uma LUT exigiria uma ROM indexada
+pelo \'indice do feixe, o que s\'o funciona se \texttt{angle\_min}, o incremento e
+o \emph{yaw} forem fixos em s\'intese --- mas eles s\~ao \textbf{par\^ametros de
+calibra\c{c}\~ao}, reescritos em tempo de execu\c{c}\~ao por AXI4-Lite. O CORDIC
+aceita qualquer \^angulo e, por usar apenas somadores e deslocamentos cabeados,
+n\~ao consome \emph{nenhum} DSP48. Como o la\c{c}o s\'o converge para
+$|z|\le\SI{1.7434}{\radian}$, um est\'agio de redu\c{c}\~ao de quadrante traz
+$\theta$ para $[-\pi/2,\pi/2]$ e inverte o sinal na sa\'ida.
+
+\paragraph{Pistas}
+Em cada pista, $\cos\delta_k$ e $\sin\delta_k$ s\~ao \textbf{constantes de
+s\'intese} (\emph{generics}): a rota\c{c}\~ao~\eqref{eq:rot} vira quatro
+multiplica\c{c}\~oes de coeficiente fixo, mapeadas diretamente em DSP48. Da\'i
+$19\times4 = \num{76}$ DSP, mais \num{2} da proje\c{c}\~ao: \num{78} de \num{220}
+dispon\'iveis no \texttt{xc7z020} (\SI{35}{\percent}).
+
+\subsection{Formato de ponto fixo}
+
+\begin{table}[!t]
+\caption{Formatos adotados}
+\label{tab:fmt}
+\centering\footnotesize
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Grandeza} & \textbf{Formato} & \textbf{Faixa} & \textbf{LSB} \\
+\midrule
+dist\^ancias, coords. & Q6.10 & $\pm\num{32}$\,m & \SI{0.98}{\milli\metre} \\
+$\cos$, $\sin$ & Q1.14 & $\pm 2$ & \num{6.1e-5} \\
+\^angulos & Q3.13 & $\pm\SI{4.0}{\radian}$ & \SI{1.22e-4}{\radian} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Interfaces AXI4}
+
+Os feixes chegam por \textbf{AXI4-Stream} (\texttt{TDATA} $=$ [$\theta$(31:16) $|$
+$r$(15:0)], \texttt{TUSER} $=$ feixe v\'alido, \texttt{TLAST} $=$ fim da
+varredura), alimentado por um AXI-DMA que l\^e a varredura da DDR. O controle e o
+resultado usam \textbf{AXI4-Lite}: \texttt{CTRL} (\emph{start}), \texttt{STATUS}
+(\emph{done}/\emph{busy}) e \num{19} registradores de folga, com sinal estendido a
+\num{32} bits. Uma interrup\c{c}\~ao sinaliza a conclus\~ao, dispensando espera
+ocupada no ARM. A escolha \'e natural: \emph{stream} para o fluxo volumoso e
+sequencial (a varredura), mapeado em mem\'oria para o punhado de escalares
+(calibra\c{c}\~ao e resultado).
+
+% =============================================================================
+\section{Resultados}
+
+\subsection{Protocolo de verifica\c{c}\~ao}
+
+A verifica\c{c}\~ao \'e feita por \emph{equival\^encia bit a bit} contra um modelo
+de refer\^encia, e n\~ao por inspe\c{c}\~ao de formas de onda. O fluxo \'e:
+
+\begin{enumerate}
+\item Um \textbf{modelo em ponto fixo} (Python) emula o RTL exatamente: mesmo
+CORDIC, mesmos deslocamentos, mesmos truncamentos.
+\item Um \textbf{modelo em ponto flutuante} serve de refer\^encia f\'isica, para
+medir o erro de quantiza\c{c}\~ao.
+\item O modelo gera o \textbf{est\'imulo} e o \textbf{esperado}; o testbench VHDL
+l\^e os arquivos, injeta os \num{720} feixes e compara as \num{19} folgas.
+\item As constantes do RTL (\texttt{cordic\_pkg.vhd}) s\~ao \textbf{geradas} pelo
+mesmo modelo, de modo que RTL e refer\^encia casam \emph{por constru\c{c}\~ao}, e
+n\~ao por transcri\c{c}\~ao manual --- um erro de digita\c{c}\~ao numa tabela de
+constantes \'e, aqui, indetect\'avel por inspe\c{c}\~ao.
+\end{enumerate}
+
+O est\'imulo n\~ao \'e sint\'etico: s\~ao tr\^es varreduras \textbf{reais} da
+cadeira, capturadas com um balde posicionado \SI{21}{\centi\metre} \`a direita do
+eixo --- exatamente o ponto cego do supervisor antigo (Fig.~\ref{fig:corredor}).
+As tr\^es passam com \textbf{zero diverg\^encia}.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=5.2cm,
+  xlabel={$X$ (m) --- \`a frente do eixo traseiro},
+  ylabel={$Y$ (m)}, xmin=0, xmax=2.6, ymin=-1.1, ymax=1.5,
+  legend pos=north east, legend style={font=\tiny},
+  grid=major, grid style={gray!20}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}, axis equal image=false]
+  \addplot[only marks, mark=*, mark size=0.5pt, gray!60]
+    table[x=x, y=y] {figs/scan_out.dat};
+  \addlegendentry{fora do corredor}
+  \addplot[only marks, mark=*, mark size=0.9pt, red!80!black]
+    table[x=x, y=y] {figs/scan_in.dat};
+  \addlegendentry{obst\'aculo (no corredor)}
+  \draw[blue!60!black, thick] (axis cs:0.687,-0.305) rectangle (axis cs:2.6,0.305);
+  \node[blue!60!black, font=\tiny] at (axis cs:2.1,0.42) {corredor da cadeira};
+  \draw[fill=black] (axis cs:0.667,0.336) circle (1.6pt);
+  \node[font=\tiny, anchor=south] at (axis cs:0.667,0.38) {LiDAR};
+\end{axis}
+\end{tikzpicture}
+\caption{Varredura real projetada no \texttt{base\_link} (est\'imulo do
+testbench). O LiDAR est\'a \SI{0.336}{\metre} \`a esquerda do eixo. Os
+\num{117} pontos em vermelho caem no corredor que a cadeira ocupar\'a --- entre
+eles o balde, que o cone antigo n\~ao enxergava.}
+\label{fig:corredor}
+\end{figure}
+
+\subsection{Precis\~ao: um defeito de formato}
+
+A an\'alise de precis\~ao produziu o achado mais instrutivo do trabalho. O
+primeiro modelo em ponto fixo divergia da refer\^encia em at\'e
+\SI{402}{\milli\metre} --- inaceit\'avel num sistema de seguran\c{c}a, e grande
+demais para ser arredondamento.
+
+A causa n\~ao era ru\'ido de quantiza\c{c}\~ao, e sim \textbf{estouro de faixa}. O
+\^angulo do feixe no referencial do sensor,
+$\theta_i = a_{\min} + i\cdot\Delta a + \theta_L$, atinge \SI{-5.85}{\radian}; o
+formato Q3.13 comporta apenas $\pm\SI{4.0}{\radian}$. O valor \textbf{saturava}, e
+o feixe era projetado numa dire\c{c}\~ao completamente errada. Envolvendo $\theta$
+em $[-\pi,\pi)$ antes da quantiza\c{c}\~ao --- opera\c{c}\~ao barata, feita no
+host --- o erro desaba (Tab.~\ref{tab:prec}).
+
+\begin{table}[!t]
+\caption{Erro do ponto fixo contra a refer\^encia em ponto flutuante}
+\label{tab:prec}
+\centering\footnotesize
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & \textbf{erro m\'edio} & \textbf{erro m\'aximo} \\
+\midrule
+$\theta$ saturado (defeito) & \SI{17.89}{\milli\metre} & \SI{402.15}{\milli\metre} \\
+$\theta$ envolvido (corrigido) & \textbf{\SI{0.99}{\milli\metre}} & \textbf{\SI{5.27}{\milli\metre}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+O erro final \'e da ordem de \textbf{um LSB} de Q6.10 (\SI{0.98}{\milli\metre}) e
+representa \SI{0.9}{\percent} da zona de parada de \SI{600}{\milli\metre} --- ou
+seja, a quantiza\c{c}\~ao \emph{n\~ao} \'e o fator limitante do sistema. A
+li\c{c}\~ao \'e que, em ponto fixo, a escolha da \textbf{faixa} costuma ser mais
+cr\'itica que a da \textbf{resolu\c{c}\~ao}: perdemos \num{402} milímetros por
+tr\^es bits de parte inteira, n\~ao por falta de bits fracion\'arios.
+
+\subsection{Desempenho}
+
+O \emph{baseline} de software foi medido na pr\'opria Raspberry~Pi~5 que embarca o
+sistema; a lat\^encia de hardware \'e o n\'umero de ciclos \textbf{medido na
+simula\c{c}\~ao} (\SI{7515}{\nano\second} a \SI{100}{\mega\hertz}), n\~ao uma
+estimativa anal\'itica.
+
+\begin{table}[!t]
+\caption{Tempo por varredura e ganho}
+\label{tab:speedup}
+\centering\footnotesize
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Implementa\c{c}\~ao} & \textbf{Tempo} & \multicolumn{2}{c}{\textbf{Speedup}} \\
+ & & vs.\ escalar & vs.\ NumPy \\
+\midrule
+Software escalar (Pi 5)      & \SI{3.54}{\milli\second}   & --- & --- \\
+Software vetorizado (NumPy)  & \SI{0.488}{\milli\second}  & \num{7.3}$\times$ & --- \\
+\textbf{HW \SI{100}{\mega\hertz}} (\num{751} ciclos) & \textbf{\SI{7.51}{\micro\second}} & \num{472}$\times$ & \num{65}$\times$ \\
+HW \SI{150}{\mega\hertz}     & \SI{5.01}{\micro\second}   & \num{707}$\times$ & \num{98}$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Vale interpretar o ganho, e n\~ao apenas exibi-lo. O LiDAR entrega uma varredura a
+cada \SI{100}{\milli\second}: mesmo o software vetorizado consome apenas
+\SI{0.5}{\percent} desse or\c{c}amento, de modo que \textbf{o acelerador n\~ao
+``salva'' o sistema} --- ele n\~ao estava perdendo prazos. O valor real \'e outro,
+e triplo: (i)~libera \SI{8.3}{\percent} da CPU num processador que tamb\'em roda
+SLAM e EKF, e que j\'a apresentou congelamento por exaust\~ao de mem\'oria;
+(ii)~torna a lat\^encia \textbf{determin\'istica}, ao contr\'ario de um n\'o
+Python sujeito ao escalonador de um Linux n\~ao-preemptivo --- e determinismo, num
+la\c{c}o de seguran\c{c}a, vale mais que m\'edia baixa; (iii)~abre or\c{c}amento
+para aumentar $K$ ou a densidade angular sem custo de tempo, j\'a que o gargalo
+passa a ser a taxa do sensor.
+
+\subsection{S\'intese: recursos, timing e pot\^encia}
+
+Alvo: \texttt{xc7z020clg484-1} (ZedBoard), per\'iodo de \SI{10}{\nano\second}.
+Os valores a seguir vêm dos relat\'orios do Vivado
+(\texttt{vivado/reports/}).
+
+\begin{table}[!t]
+\caption{S\'intese e implementa\c{c}\~ao (Vivado, \texttt{xc7z020})}
+\label{tab:util}
+\centering\footnotesize
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Recurso} & \textbf{Usado} & \textbf{Dispon\'ivel} & \textbf{\%} \\
+\midrule
+LUT        & \vivado{---} & \num{53200} & \vivado{---} \\
+Flip-flop  & \vivado{---} & \num{106400} & \vivado{---} \\
+DSP48      & \vivado{---} & \num{220}   & \vivado{---} \\
+BRAM       & \vivado{---} & \num{140}   & \vivado{---} \\
+\midrule
+WNS (folga) & \multicolumn{3}{l}{\vivado{--- ns}} \\
+$F_{\max}$  & \multicolumn{3}{l}{\vivado{--- MHz}} \\
+Pot\^encia total & \multicolumn{3}{l}{\vivado{--- W}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Previs\~ao anal\'itica} (a ser confrontada com a
+Tab.~\ref{tab:util}): \num{78} DSP48 (\SI{35}{\percent}) --- \num{76} das pistas
+mais \num{2} da proje\c{c}\~ao; nenhum BRAM, pois n\~ao h\'a mem\'oria interna
+(o fluxo \'e puramente \emph{streaming}); e o caminho cr\'itico deve situar-se no
+somador de \num{32} bits que soma os dois produtos da pista, antes do
+truncamento.
+
+% =============================================================================
+\section{Conclus\~ao}
+
+O acelerador atinge o objetivo: \num{472}$\times$ mais r\'apido que o software
+escalar e \num{65}$\times$ que o vetorizado, com equival\^encia \textbf{bit a
+bit} verificada contra um modelo de refer\^encia sobre dados reais da cadeira.
+
+A an\'alise cr\'itica, por\'em, precisa ir al\'em do n\'umero. \textbf{O ganho de
+tempo n\~ao era necess\'ario}: o software j\'a cabia folgadamente no or\c{c}amento
+de \SI{100}{\milli\second} do sensor. O benef\'icio leg\'itimo \'e o alívio de CPU
+numa Pi que roda SLAM e EKF, e sobretudo o \textbf{determinismo} da lat\^encia num
+la\c{c}o de seguran\c{c}a. Reportamos isso explicitamente porque a conclus\~ao
+oposta --- ``aceleramos, logo o sistema melhorou'' --- seria uma leitura
+desonesta dos dados.
+
+O resultado mais transfer\'ivel n\~ao \'e o \emph{speedup}, e sim o
+\textbf{defeito de faixa em Q3.13}: um \^angulo de \SI{-5.85}{\radian} saturando
+num formato de $\pm\SI{4}{\radian}$ produziu \SI{402}{\milli\metre} de erro
+\emph{silencioso} --- o RTL n\~ao acusa, a simula\c{c}\~ao ``roda'', e s\'o a
+compara\c{c}\~ao com uma refer\^encia f\'isica revela. Foi o modelo de ouro, e
+n\~ao a inspe\c{c}\~ao de ondas, que o encontrou.
+
+\subsection{Trabalhos futuros}
+\begin{enumerate}
+\item \textbf{Gravar em placa}: os resultados aqui s\~ao de simula\c{c}\~ao
+p\'os-s\'intese; falta o ensaio no ZedBoard, com o driver do ARM
+(\texttt{sw/lidar\_accel.c}) sobre o AXI-DMA.
+\item \textbf{Explorar o espa\c{c}o de projeto}: com \SI{35}{\percent} dos DSP
+usados, cabem $K$ maior (mais candidatos) ou pistas com maior precis\~ao;
+resta caracterizar o \emph{trade-off} recursos $\times$ pot\^encia $\times$
+qualidade da decis\~ao.
+\item \textbf{Reduzir a lat\^encia fim-a-fim}: o acelerador resolve
+\SI{7.5}{\micro\second} de um la\c{c}o cujo verdadeiro atraso \'e a
+\SI{100}{\milli\second} do sensor. O ganho maior estaria em processar a varredura
+\emph{incrementalmente}, \`a medida que os feixes chegam --- algo que a
+arquitetura \emph{streaming} j\'a permite, e o software n\~ao.
+\end{enumerate}
+
+% =============================================================================
+\begin{thebibliography}{9}
+
+\bibitem{fehr2000}
+L.~Fehr, W.~E. Langbein e S.~B. Skaar, ``Adequacy of power wheelchair control
+interfaces for persons with severe disabilities: A clinical survey,''
+\emph{J. Rehabil. Res. Dev.}, vol.~37, no.~3, pp.~353--360, 2000.
+
+\bibitem{borenstein1991}
+J.~Borenstein e Y.~Koren, ``The Vector Field Histogram --- Fast Obstacle
+Avoidance for Mobile Robots,'' \emph{IEEE Trans. Robot. Autom.}, vol.~7, no.~3,
+pp.~278--288, 1991.
+
+\bibitem{volder1959}
+J.~E. Volder, ``The CORDIC Trigonometric Computing Technique,'' \emph{IRE Trans.
+Electron. Comput.}, vol.~EC-8, no.~3, pp.~330--334, 1959.
+
+\bibitem{andraka1998}
+R.~Andraka, ``A survey of CORDIC algorithms for FPGA based computers,'' em
+\emph{Proc. ACM/SIGDA Int. Symp. FPGAs}, 1998, pp.~191--200.
+
+\bibitem{zynqbook}
+L.~H. Crockett, R.~A. Elliot, M.~A. Enderwitz e R.~W. Stewart, \emph{The Zynq
+Book: Embedded Processing with the ARM Cortex-A9 on the Xilinx Zynq-7000}.
+Glasgow: Strathclyde Academic Media, 2014.
+
+\bibitem{ros2docs}
+Open Robotics, ``ROS\,2 Jazzy Jalisco Documentation,'' 2024. [Online].
+Dispon\'ivel: \url{https://docs.ros.org/en/jazzy/}
+
+\end{thebibliography}
+
+\end{document}
