@@ -1,0 +1,407 @@
+% =============================================================================
+%  Acelerador em FPGA do Supervisor de Seguranca LiDAR de uma Cadeira de Rodas
+%  Ponto de Controle 2 (PC2) -- Implementacao RTL e Verificacao por Equivalencia
+%  PCR / Co-Projeto Hardware-Software -- UnB 2026/1
+%
+%  Compilacao: pdflatex relatorio_pcr_pc2.tex  (2x, por causa das referencias)
+%  Requer os .dat em figs/ (gerados por golden/gen_figs.py e gen_figs_cmp.py).
+%
+%  Este e o SEGUNDO ponto de controle: o RTL esta escrito e verificado por
+%  simulacao (equivalencia bit a bit contra o modelo de ouro, sobre varreduras
+%  reais). A lat encia vem da simulacao GHDL. A SINTESE (recursos, timing,
+%  potencia, block design) ainda NAO foi rodada -- e o objeto de PC3.
+% =============================================================================
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{listings}
+\usepackage{siunitx}
+\pgfplotsset{compat=1.17}
+\usetikzlibrary{arrows.meta, positioning, fit, calc}
+
+\sisetup{output-decimal-marker={,}, per-mode=symbol, detect-all}
+
+\lstset{basicstyle=\ttfamily\scriptsize, breaklines=true, columns=fullflexible,
+        frame=single, framesep=3pt, xleftmargin=2pt}
+
+\begin{document}
+
+\title{Acelerador em FPGA para o Supervisor de Seguran\c{c}a\\
+LiDAR de uma Cadeira de Rodas Semi-Assistida:\\
+\large Ponto de Controle 2 --- Implementa\c{c}\~ao RTL e Verifica\c{c}\~ao por Equival\^encia}
+
+\author{
+\IEEEauthorblockN{Vítor Gonçalves de Andrade Silva}
+\IEEEauthorblockA{Engenharia Eletrônica --- FCTE/UnB\\
+Email: 261025182@aluno.unb.br}
+\and
+\IEEEauthorblockN{Thiago Henrique Oliveira Souza}
+\IEEEauthorblockA{Engenharia Eletrônica --- FCTE/UnB\\
+Email: 180131672@aluno.unb.br}
+}
+
+\maketitle
+
+% =============================================================================
+\begin{abstract}
+Este segundo ponto de controle implementa em VHDL a arquitetura proposta em PC1
+--- um CORDIC pipelinado de \num{16} est\'agios alimentando \num{19} pistas
+paralelas de coeficiente constante --- e a verifica por \textbf{equival\^encia bit
+a bit} contra um modelo de refer\^encia, sobre tr\^es varreduras \emph{reais}
+capturadas na cadeira. As tr\^es passam com zero diverg\^encia. A
+verifica\c{c}\~ao exp\^os o risco antecipado em PC1: um \textbf{defeito de faixa}
+no formato Q3.13. O \^angulo do feixe atinge \SI{-5.85}{\radian} e n\~ao cabe em
+$\pm\SI{4.0}{\radian}$, saturando e projetando o ponto no lugar errado (erro de
+\SI{402}{\milli\metre}); envolvendo o \^angulo em $[-\pi,\pi)$ antes da
+quantiza\c{c}\~ao, o erro cai a \SI{0.99}{\milli\metre} m\'edio --- cerca de um
+LSB. A lat\^encia, medida na simula\c{c}\~ao GHDL, \'e de \num{751} ciclos
+(\SI{7.51}{\micro\second} a \SI{100}{\mega\hertz}); contra o \emph{baseline}
+medido na pr\'opria Raspberry~Pi~5 (\SI{3.54}{\milli\second} escalar,
+\SI{0.488}{\milli\second} vetorizado), \num{472}$\times$ e \num{65}$\times$. A
+s\'intese --- recursos, \emph{timing}, pot\^encia e integra\c{c}\~ao em SoC ---
+ainda \textbf{n\~ao foi executada} e \'e o objeto do ponto de controle final.
+\end{abstract}
+
+% =============================================================================
+\section{Recapitula\c{c}\~ao}
+
+Em PC1 identificamos, por perfilamento, o teste de corredor do supervisor de
+seguran\c{c}a como o bloco a acelerar: \'e o n\'o mais pesado
+(\SI{17.7}{\percent} da CPU da Pi~5) e o \'unico cuja lat\^encia tem
+consequ\^encia f\'isica, pois s\'o corta o avan\c{c}o e a cadeira ainda percorre
+dist\^ancia por in\'ercia~\cite{fehr2000}. O algoritmo projeta os \num{720}
+feixes no referencial \texttt{base\_link} e testa, para \num{19} dire\c{c}\~oes
+candidatas $\delta_k$, se cada ponto cai no corredor f\'isico da cadeira
+(largura $W=\SI{0.61}{\metre}$, frente $X_f=\SI{0.667}{\metre}$) --- \num{9918}
+avalia\c{c}\~oes por varredura, custo $O(N\cdot K)$. Propusemos migrar esse custo
+para hardware e manter a fun\c{c}\~ao custo $O(K)$ no ARM, onde vivem os pesos
+ajustados em campo. Este documento implementa e verifica; a s\'intese fica para
+PC3.
+
+% =============================================================================
+\section{Implementa\c{c}\~ao RTL}
+
+O RTL est\'a organizado em quatro m\'odulos VHDL (Tab.~\ref{tab:rtl}), do CORDIC
+ao envelope AXI, todos parametriz\'aveis pelos formatos fixados em PC1.
+
+\begin{table}[!t]
+\caption{M\'odulos RTL implementados}
+\label{tab:rtl}
+\centering\footnotesize
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Arquivo} & \textbf{Fun\c{c}\~ao} \\
+\midrule
+\texttt{cordic\_pkg.vhd}   & constantes (\textbf{geradas} pelo modelo de ouro) \\
+\texttt{cordic.vhd}        & CORDIC rota\c{c}\~ao, \num{16} est\'agios, \num{0} DSP \\
+\texttt{lane.vhd}          & uma pista: rota\c{c}\~ao de coef.\ constante $+$ teste \\
+\texttt{corridor\_core.vhd}& proje\c{c}\~ao $+$ \num{19} pistas $+$ redu\c{c}\~ao de m\'inimo \\
+\texttt{lidar\_accel\_axi.vhd} & envelope AXI4-Stream (feixes) $+$ AXI4-Lite (ctrl/folgas) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{CORDIC}
+Implementado em modo rota\c{c}\~ao~\cite{volder1959}, pipelinado em \num{16}
+est\'agios, usando apenas somadores e deslocamentos cabeados --- sem nenhum
+multiplicador. Como o la\c{c}o s\'o converge para $|z|\le\SI{1.7434}{\radian}$, um
+est\'agio de redu\c{c}\~ao de quadrante traz $\theta$ para $[-\pi/2,\pi/2]$ e
+inverte o sinal na sa\'ida. A op\c{c}\~ao por CORDIC, e n\~ao por LUT de seno, se
+justifica porque \texttt{angle\_min}, o incremento e o \emph{yaw} s\~ao
+par\^ametros de calibra\c{c}\~ao reescritos em tempo de execu\c{c}\~ao via
+AXI4-Lite --- uma ROM indexada pelo \'indice do feixe exigiria fix\'a-los em
+s\'intese.
+
+\paragraph{Pistas}
+Em cada pista, $\cos\delta_k$ e $\sin\delta_k$ s\~ao \emph{generics} constantes de
+s\'intese; a rota\c{c}\~ao vira quatro multiplica\c{c}\~oes de coeficiente fixo. O
+\emph{core} instancia as \num{19} pistas em paralelo, de modo que a vaz\~ao alvo
+de \textbf{1 feixe/ciclo} se mant\'em: cada feixe projetado \'e avaliado
+simultaneamente pelos \num{19} candidatos.
+
+\paragraph{Constantes geradas, n\~ao transcritas}
+As tabelas de \texttt{atan}, o ganho do CORDIC e os coeficientes das pistas em
+\texttt{cordic\_pkg.vhd} s\~ao \textbf{gerados} por \texttt{golden/gen\_pkg.py} a
+partir do mesmo modelo que serve de refer\^encia. Assim, RTL e refer\^encia casam
+\emph{por constru\c{c}\~ao}: um erro de digita\c{c}\~ao numa tabela de constantes
+seria, de outro modo, indetect\'avel por inspe\c{c}\~ao.
+
+% =============================================================================
+\section{Modelo de Ouro e Metodologia de Verifica\c{c}\~ao}
+
+Conforme planejado em PC1, a verifica\c{c}\~ao \'e por \textbf{equival\^encia bit
+a bit}, e n\~ao por inspe\c{c}\~ao de formas de onda:
+\begin{enumerate}
+\item um \textbf{modelo em ponto fixo} (\texttt{golden/model.py}) emula o RTL
+exatamente --- mesmo CORDIC, mesmos deslocamentos, mesmos truncamentos;
+\item um \textbf{modelo em ponto flutuante} serve de refer\^encia f\'isica, para
+medir o erro de quantiza\c{c}\~ao;
+\item o modelo gera o \textbf{est\'imulo} e o \textbf{esperado}; o testbench VHDL
+(\texttt{tb/tb\_corridor\_core.vhd}) l\^e os arquivos, injeta os \num{720} feixes
+e compara as \num{19} folgas;
+\item o est\'imulo n\~ao \'e sint\'etico: s\~ao tr\^es varreduras \textbf{reais}
+da cadeira, capturadas com um balde posicionado \SI{21}{\centi\metre} \`a direita
+do eixo --- exatamente o antigo ponto cego (Fig.~\ref{fig:corredor}).
+\end{enumerate}
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=5.2cm,
+  xlabel={$X$ (m) --- \`a frente do eixo traseiro},
+  ylabel={$Y$ (m)}, xmin=0, xmax=2.6, ymin=-1.1, ymax=1.5,
+  legend pos=north east, legend style={font=\tiny},
+  grid=major, grid style={gray!20}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}, axis equal image=false]
+  \addplot[only marks, mark=*, mark size=0.5pt, gray!60]
+    table[x=x, y=y] {figs/scan_out.dat};
+  \addlegendentry{fora do corredor}
+  \addplot[only marks, mark=*, mark size=0.9pt, red!80!black]
+    table[x=x, y=y] {figs/scan_in.dat};
+  \addlegendentry{obst\'aculo (no corredor)}
+  \draw[blue!60!black, thick] (axis cs:0.687,-0.305) rectangle (axis cs:2.6,0.305);
+  \node[blue!60!black, font=\tiny] at (axis cs:2.1,0.42) {corredor da cadeira};
+  \draw[fill=black] (axis cs:0.667,0.336) circle (1.6pt);
+  \node[font=\tiny, anchor=south] at (axis cs:0.667,0.38) {LiDAR};
+\end{axis}
+\end{tikzpicture}
+\caption{Varredura real projetada no \texttt{base\_link} (est\'imulo do
+testbench). O LiDAR est\'a \SI{0.336}{\metre} \`a esquerda do eixo. Os pontos em
+vermelho caem no corredor que a cadeira ocupar\'a --- entre eles o balde, que o
+cone antigo n\~ao enxergava.}
+\label{fig:corredor}
+\end{figure}
+
+% =============================================================================
+\section{Resultados de Simula\c{c}\~ao}
+
+\subsection{Equival\^encia}
+As tr\^es varreduras reais passam pelo testbench com \textbf{zero diverg\^encia}:
+para cada uma, as \num{19} folgas produzidas pelo RTL simulado coincidem com o
+esperado gerado pelo modelo de ponto fixo. A Fig.~\ref{fig:swhw} confronta, por
+candidato, a folga do software (ponto flutuante, a refer\^encia f\'isica) com a
+sa\'ida efetiva da simula\c{c}\~ao VHDL; as curvas se sobrep\~oem.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=4.4cm,
+  xlabel={candidato de desvio $\delta_k$ (graus)},
+  ylabel={folga (m)}, xmin=-48, xmax=48, xtick={-45,-30,-15,0,15,30,45},
+  legend pos=north west, legend style={font=\scriptsize},
+  grid=major, grid style={gray!20}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}]
+  \addplot[thick, blue!70!black, mark=o, mark size=2pt]
+    table[x=delta, y=sw] {figs/sw_hw_scan0.dat};
+  \addlegendentry{SW (ponto flutuante)}
+  \addplot[thick, red, only marks, mark=x, mark size=3pt]
+    table[x=delta, y=hw] {figs/sw_hw_scan0.dat};
+  \addlegendentry{HW (RTL simulado)}
+\end{axis}
+\end{tikzpicture}
+\caption{Folga por candidato: software \emph{versus} sa\'ida real do RTL, para a
+varredura de teste. As curvas se sobrep\~oem em toda a faixa --- o desvio \'e
+invis\'ivel nesta escala, precisamente o resultado desejado.}
+\label{fig:swhw}
+\end{figure}
+
+\subsection{Precis\~ao: um defeito de formato}
+\label{sec:prec}
+A an\'alise de precis\~ao confirmou o risco levantado em PC1 e produziu o achado
+mais instrutivo desta fase. O primeiro modelo em ponto fixo divergia da
+refer\^encia em at\'e \SI{402}{\milli\metre} --- inaceit\'avel num sistema de
+seguran\c{c}a, e grande demais para ser arredondamento.
+
+A causa n\~ao era ru\'ido de quantiza\c{c}\~ao, e sim \textbf{estouro de faixa}. O
+\^angulo do feixe no referencial do sensor,
+$\theta_i = a_{\min} + i\cdot\Delta a + \theta_L$, atinge \SI{-5.85}{\radian}; o
+formato Q3.13 comporta apenas $\pm\SI{4.0}{\radian}$. O valor \textbf{saturava}, e
+o feixe era projetado numa dire\c{c}\~ao completamente errada. Envolvendo
+$\theta$ em $[-\pi,\pi)$ antes da quantiza\c{c}\~ao --- opera\c{c}\~ao barata,
+feita no host --- o erro desaba (Tab.~\ref{tab:prec}).
+
+\begin{table}[!t]
+\caption{Erro do ponto fixo contra a refer\^encia em ponto flutuante}
+\label{tab:prec}
+\centering\footnotesize
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & \textbf{erro m\'edio} & \textbf{erro m\'aximo} \\
+\midrule
+$\theta$ saturado (defeito) & \SI{17.89}{\milli\metre} & \SI{402.15}{\milli\metre} \\
+$\theta$ envolvido (corrigido) & \textbf{\SI{0.99}{\milli\metre}} & \textbf{\SI{5.27}{\milli\metre}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+O erro final \'e da ordem de \textbf{um LSB} de Q6.10 (\SI{0.98}{\milli\metre}) e
+representa \SI{0.9}{\percent} da zona de parada de \SI{600}{\milli\metre}: a
+quantiza\c{c}\~ao \emph{n\~ao} \'e o fator limitante. A li\c{c}\~ao \'e que, em
+ponto fixo, a escolha da \textbf{faixa} costuma ser mais cr\'itica que a da
+\textbf{resolu\c{c}\~ao} --- perdemos \num{402} milímetros por tr\^es bits de
+parte inteira, n\~ao por falta de bits fracion\'arios. A Fig.~\ref{fig:erro}
+mostra o res\'iduo com sinal nas tr\^es varreduras.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=4.2cm,
+  xlabel={candidato de desvio $\delta_k$ (graus)},
+  ylabel={erro HW$-$SW (mm)}, xmin=-48, xmax=48,
+  xtick={-45,-30,-15,0,15,30,45},
+  legend pos=south west, legend style={font=\tiny},
+  grid=major, grid style={gray!20}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}]
+  \draw[gray, dashed] (axis cs:-48,0.98) -- (axis cs:48,0.98);
+  \draw[gray, dashed] (axis cs:-48,-0.98) -- (axis cs:48,-0.98);
+  \node[gray, font=\tiny, anchor=west] at (axis cs:-46,1.7) {$\pm 1$ LSB};
+  \addplot[only marks, mark=*, mark size=1.6pt, blue!70!black]
+    table[x=delta, y=err_mm] {figs/err_scan0.dat};
+  \addlegendentry{varredura 0}
+  \addplot[only marks, mark=square*, mark size=1.6pt, red!70!black]
+    table[x=delta, y=err_mm] {figs/err_scan1.dat};
+  \addlegendentry{varredura 1}
+  \addplot[only marks, mark=triangle*, mark size=2pt, orange!90!black]
+    table[x=delta, y=err_mm] {figs/err_scan2.dat};
+  \addlegendentry{varredura 2}
+\end{axis}
+\end{tikzpicture}
+\caption{Res\'iduo HW$-$SW, com sinal, nas tr\^es varreduras (\num{57}
+compara\c{c}\~oes). Linhas tracejadas: $\pm1$ LSB de Q6.10
+(\SI{0.98}{\milli\metre}). O erro m\'aximo, \SI{5.27}{\milli\metre}, ocorre quando
+a quantiza\c{c}\~ao faz um ponto pr\'oximo da borda cruzar o limiar
+$|y|\le W/2$ --- efeito de um crit\'erio por limiar, n\~ao ac\'umulo aritm\'etico.}
+\label{fig:erro}
+\end{figure}
+
+\subsection{Lat\^encia medida em simula\c{c}\~ao}
+A lat\^encia \'e o n\'umero de ciclos \textbf{contado na simula\c{c}\~ao} GHDL,
+n\~ao uma estimativa anal\'itica: \num{751} ciclos por varredura, ou
+\SI{7.51}{\micro\second} a \SI{100}{\mega\hertz} --- pr\'oximo da previs\~ao de
+PC1 ($\sim N$ mais a profundidade do \emph{pipeline}). O \emph{baseline} de
+software foi medido na pr\'opria Raspberry~Pi~5 que embarca o sistema
+(Tab.~\ref{tab:speedup}).
+
+\begin{table}[!t]
+\caption{Tempo por varredura e ganho (lat\^encia HW por simula\c{c}\~ao)}
+\label{tab:speedup}
+\centering\footnotesize
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Implementa\c{c}\~ao} & \textbf{Tempo} & \textbf{Speedup} \\
+\midrule
+Software escalar (Pi 5)      & \SI{3.54}{\milli\second}   & --- \\
+Software vetorizado (NumPy)  & \SI{0.488}{\milli\second}  & \num{7.3}$\times$ \\
+\textbf{HW \SI{100}{\mega\hertz}} (\num{751} ciclos) & \textbf{\SI{7.51}{\micro\second}} & \num{472}$\times$ / \num{65}$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Vale a interpreta\c{c}\~ao honesta, j\'a poss\'ivel nesta fase: o LiDAR entrega
+uma varredura a cada \SI{100}{\milli\second}, e mesmo o software vetorizado
+consome apenas \SI{0.5}{\percent} desse or\c{c}amento. O acelerador n\~ao
+``salva'' o sistema de perder prazos; seu valor \'e liberar CPU numa Pi que roda
+SLAM e EKF e, sobretudo, tornar a lat\^encia \textbf{determin\'istica}. A
+quantifica\c{c}\~ao definitiva desse ganho depende da s\'intese (pot\^encia,
+$F_{\max}$), ainda pendente.
+
+% =============================================================================
+\section{Estado da S\'intese --- Pendente}
+
+A s\'intese ainda \textbf{n\~ao foi executada}. Mantemos, at\'e PC3, apenas a
+estimativa anal\'itica de PC1: \num{78} DSP48 ($19\times4$ das pistas mais
+\num{2} da proje\c{c}\~ao) e \num{0} BRAM, por ser \emph{streaming}. Esses
+n\'umeros de recursos, o fechamento de \emph{timing} (WNS, $F_{\max}$), a
+pot\^encia e a integra\c{c}\~ao em \emph{block design} com o ARM e o AXI-DMA
+constituem o escopo do ponto de controle final. Registramos a previs\~ao aqui
+justamente para confront\'a-la, em PC3, com o que a ferramenta efetivamente
+produzir.
+
+\begin{table}[!t]
+\caption{O que fecha em PC3}
+\label{tab:pc3}
+\centering\footnotesize
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Item} & \textbf{Estado ap\'os PC2} \\
+\midrule
+RTL (CORDIC, pista, \emph{core}, AXI) & \textbf{implementado} \\
+Verifica\c{c}\~ao por equival\^encia    & \textbf{passa (3 varreduras reais)} \\
+Defeito de faixa Q3.13                 & \textbf{encontrado e corrigido} \\
+Lat\^encia (simula\c{c}\~ao)           & \textbf{\num{751} ciclos} \\
+Recursos, \emph{timing}, pot\^encia    & pendente (s\'intese em PC3) \\
+\emph{Block design} / grava\c{c}\~ao em placa & pendente (PC3) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =============================================================================
+\section{Pr\'oximos Passos (PC3)}
+\begin{enumerate}
+\item \textbf{Sintetizar} no \texttt{xc7z020clg484-1} (ZedBoard) e extrair
+recursos, WNS/$F_{\max}$ e pot\^encia; confrontar os DSP obtidos com a previs\~ao
+de \num{78}.
+\item \textbf{Integrar em SoC}: empacotar o acelerador como IP e mont\'a-lo com o
+ARM Cortex-A9 e o AXI-DMA num \emph{block design}.
+\item \textbf{Gravar em placa} e exercitar o driver do ARM
+(\texttt{sw/lidar\_accel.c}) sobre o AXI-DMA, fechando o co-projeto.
+\end{enumerate}
+
+% =============================================================================
+\section{Conclus\~ao Parcial}
+
+O RTL da arquitetura proposta em PC1 est\'a escrito e \textbf{verificado por
+equival\^encia bit a bit} contra um modelo de refer\^encia, sobre dados reais da
+cadeira: as tr\^es varreduras passam. A verifica\c{c}\~ao confirmou o risco que
+hav\'iamos sinalizado --- a faixa do formato de \^angulo --- e o converteu no
+resultado mais transfer\'ivel desta fase: um \^angulo de \SI{-5.85}{\radian}
+saturando em Q3.13 produziu \SI{402}{\milli\metre} de erro \emph{silencioso}, que
+s\'o a compara\c{c}\~ao com uma refer\^encia f\'isica revelou. A lat\^encia
+medida em simula\c{c}\~ao (\num{751} ciclos) confirma a ordem de grandeza
+prevista. Resta a s\'intese --- recursos, \emph{timing}, pot\^encia e
+integra\c{c}\~ao em SoC ---, objeto do ponto de controle final.
+
+% =============================================================================
+\begin{thebibliography}{9}
+
+\bibitem{fehr2000}
+L.~Fehr, W.~E. Langbein e S.~B. Skaar, ``Adequacy of power wheelchair control
+interfaces for persons with severe disabilities: A clinical survey,''
+\emph{J. Rehabil. Res. Dev.}, vol.~37, no.~3, pp.~353--360, 2000.
+
+\bibitem{borenstein1991}
+J.~Borenstein e Y.~Koren, ``The Vector Field Histogram --- Fast Obstacle
+Avoidance for Mobile Robots,'' \emph{IEEE Trans. Robot. Autom.}, vol.~7, no.~3,
+pp.~278--288, 1991.
+
+\bibitem{volder1959}
+J.~E. Volder, ``The CORDIC Trigonometric Computing Technique,'' \emph{IRE Trans.
+Electron. Comput.}, vol.~EC-8, no.~3, pp.~330--334, 1959.
+
+\bibitem{andraka1998}
+R.~Andraka, ``A survey of CORDIC algorithms for FPGA based computers,'' em
+\emph{Proc. ACM/SIGDA Int. Symp. FPGAs}, 1998, pp.~191--200.
+
+\bibitem{zynqbook}
+L.~H. Crockett, R.~A. Elliot, M.~A. Enderwitz e R.~W. Stewart, \emph{The Zynq
+Book: Embedded Processing with the ARM Cortex-A9 on the Xilinx Zynq-7000}.
+Glasgow: Strathclyde Academic Media, 2014.
+
+\bibitem{ros2docs}
+Open Robotics, ``ROS\,2 Jazzy Jalisco Documentation,'' 2024. [Online].
+Dispon\'ivel: \url{https://docs.ros.org/en/jazzy/}
+
+\end{thebibliography}
+
+\end{document}
